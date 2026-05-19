@@ -1,0 +1,73 @@
+# ─────────────────────────────────────────────────────────────
+# .gitignore — Nigeria Disease Surveillance
+# ─────────────────────────────────────────────────────────────
+
+# ── Secrets — never commit these ──────────────────────────────
+.env
+*.pem
+*.key
+
+# ── Raw data — too large and may contain sensitive info ───────
+data/raw/
+data/processed/
+data/shapefiles/
+*.csv
+*.xlsx
+*.xls
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+
+# ── But DO track these sample/seed files ──────────────────────
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/shapefiles/.gitkeep
+!sql/*.sql
+
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# ── Virtual environments ──────────────────────────────────────
+venv/
+.venv/
+env/
+.env/
+
+# ── Testing & coverage ────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+*.xml
+
+# ── Jupyter ───────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ── IDEs ──────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── Docker ────────────────────────────────────────────────────
+.docker/
+
+# ── Logs ──────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Reports (regenerate from code) ────────────────────────────
+reports/*.pdf

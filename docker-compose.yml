@@ -1,0 +1,81 @@
+# ─────────────────────────────────────────────────────────────
+# docker-compose.yml — Local development stack
+#
+# Services:
+#   db  — PostgreSQL 15 with PostGIS 3.3
+#   api — FastAPI application
+#   etl — One-off ETL pipeline runner
+#
+# Usage:
+#   Start DB + API:  docker-compose up db api
+#   Run ETL once:    docker-compose run --rm etl
+#   Full stack:      docker-compose up
+# ─────────────────────────────────────────────────────────────
+
+version: "3.9"
+
+services:
+
+  # ── PostgreSQL + PostGIS ─────────────────────────────────────
+  db:
+    image: postgis/postgis:15-3.3
+    container_name: nigeria_health_db
+    environment:
+      POSTGRES_DB: nigeria_health
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-localdev}
+    ports:
+      - "5432:5432"
+    volumes:
+      # Persist data between container restarts
+      - pgdata:/var/lib/postgresql/data
+      # Run schema + seed SQL on first startup
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+      - ./sql/seed_lookups.sql:/docker-entrypoint-initdb.d/02_seed.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d nigeria_health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── FastAPI service ──────────────────────────────────────────
+  api:
+    build: .
+    container_name: nigeria_health_api
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:${DB_PASSWORD:-localdev}@db:5432/nigeria_health
+      API_KEY: ${API_KEY:-dev-api-key}
+      APP_ENV: development
+      LOG_LEVEL: INFO
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount source for live reload during development
+      - ./src:/app/src
+      - ./data:/app/data
+    restart: unless-stopped
+
+  # ── ETL pipeline (run once, then exit) ───────────────────────
+  etl:
+    build: .
+    container_name: nigeria_health_etl
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:${DB_PASSWORD:-localdev}@db:5432/nigeria_health
+      APP_ENV: development
+      LOG_LEVEL: INFO
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+    command: python -m src.etl.pipeline
+    # This service exits after the pipeline completes
+    restart: "no"
+
+volumes:
+  pgdata:
+    name: nigeria_health_pgdata

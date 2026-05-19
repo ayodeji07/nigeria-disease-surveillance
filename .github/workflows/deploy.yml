@@ -1,0 +1,144 @@
+# ─────────────────────────────────────────────────────────────────
+# .github/workflows/deploy.yml
+#
+# CI/CD pipeline — runs on every push to main branch.
+#
+# Stages:
+#   1. test  — run the pytest test suite
+#   2. deploy — trigger a Render.com redeploy (only on main, after tests pass)
+#
+# Required GitHub Secrets:
+#   RENDER_API_KEY        — Render.com API key
+#   RENDER_SERVICE_ID     — Service ID of your Render web service
+#                           (found in the Render dashboard URL)
+#
+# To get RENDER_SERVICE_ID:
+#   1. Go to your service on render.com
+#   2. The URL looks like: render.com/services/srv-xxxxxxxxxx
+#   3. The service ID is "srv-xxxxxxxxxx"
+# ─────────────────────────────────────────────────────────────────
+
+name: Test & Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - develop            # Also run tests on develop, but skip deploy
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  # ──────────────────────────────────────────────────────────────
+  # Stage 1: Run test suite
+  # ──────────────────────────────────────────────────────────────
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        env:
+          # Use SQLite for CI — no PostgreSQL setup needed
+          DATABASE_URL: sqlite:///./test_ci.db
+          API_KEY:      ci-test-key
+          APP_ENV:      development
+          LOG_LEVEL:    WARNING    # Reduce log noise in CI output
+        run: |
+          pytest tests/ \
+            --tb=short \
+            --quiet \
+            -x \
+            --timeout=60
+
+      # Upload test results as an artifact so they appear in the
+      # GitHub Actions summary even on failure
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ github.run_number }}
+          path: |
+            .pytest_cache/
+            test_ci.db
+          retention-days: 3
+
+      - name: Write test summary
+        if: always()
+        run: |
+          echo "## Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Branch: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Commit: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+
+  # ──────────────────────────────────────────────────────────────
+  # Stage 2: Deploy to Render (main branch only, after tests pass)
+  # ──────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to Render
+    runs-on: ubuntu-latest
+    needs: test                   # Only runs if test stage passed
+    timeout-minutes: 10
+
+    # Only deploy on pushes to main — not on PRs or develop
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Trigger Render deploy
+        run: |
+          echo "Triggering deployment to Render..."
+          curl \
+            --silent \
+            --fail \
+            --request POST \
+            --header "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            --header "Content-Type: application/json" \
+            --data '{"clearCache": false}' \
+            "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys"
+          echo "Deploy triggered successfully"
+
+      - name: Wait for deploy and verify health
+        run: |
+          echo "Waiting 90 seconds for deploy to complete..."
+          sleep 90
+
+          # Poll the health endpoint to confirm the new version is up
+          MAX_ATTEMPTS=5
+          ATTEMPT=0
+          until curl --silent --fail \
+            "https://nigeria-health-api.onrender.com/health" > /dev/null 2>&1; do
+            ATTEMPT=$((ATTEMPT + 1))
+            if [ $ATTEMPT -ge $MAX_ATTEMPTS ]; then
+              echo "Health check failed after $MAX_ATTEMPTS attempts"
+              exit 1
+            fi
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS — waiting 30s..."
+            sleep 30
+          done
+          echo "Deployment verified — API is healthy"
+
+      - name: Write deploy summary
+        if: always()
+        run: |
+          echo "## Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Service: Nigeria Disease Surveillance API" >> $GITHUB_STEP_SUMMARY
+          echo "Platform: Render.com" >> $GITHUB_STEP_SUMMARY
+          echo "Branch: main" >> $GITHUB_STEP_SUMMARY
+          echo "Timestamp: $(date -u '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY

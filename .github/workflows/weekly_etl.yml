@@ -1,0 +1,127 @@
+# ─────────────────────────────────────────────────────────────────
+# .github/workflows/weekly_etl.yml
+#
+# Automated weekly ETL pipeline for Nigeria Disease Surveillance.
+#
+# Triggers:
+#   - Every Monday at 06:00 UTC (after NCDC typically publishes
+#     the previous week's situation reports on Mondays)
+#   - Manual trigger via GitHub Actions "Run workflow" button
+#     (useful for re-running after fixing a bug)
+#
+# What it does:
+#   1. Checks out the repository
+#   2. Sets up Python 3.11
+#   3. Installs all dependencies
+#   4. Runs the full ETL pipeline (extract → transform → validate → load)
+#   5. Notifies the configured email on success or failure
+#
+# Required GitHub Secrets (set in repo Settings → Secrets → Actions):
+#   DATABASE_URL     — PostgreSQL connection string for production DB
+#   NOTIFY_EMAIL     — email address for pipeline notifications
+#   SENDGRID_API_KEY — SendGrid key for email delivery
+#
+# Optional:
+#   API_KEY          — API key for the FastAPI service
+# ─────────────────────────────────────────────────────────────────
+
+name: Weekly ETL Pipeline
+
+on:
+  schedule:
+    # Every Monday at 06:00 UTC
+    # Cron syntax: minute hour day-of-month month day-of-week
+    - cron: "0 6 * * 1"
+
+  # Allow manual trigger from the GitHub Actions UI
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (validate only, skip DB writes)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      force:
+        description: "Force load even if validation errors found"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+jobs:
+  run_etl:
+    name: Run ETL pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 60       # Pipeline should complete in under 1 hour
+
+    steps:
+      # ── 1. Checkout ─────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python setup ─────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"           # Cache pip deps between runs
+
+      # ── 3. Install dependencies ──────────────────────────────────
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ── 4. Run ETL pipeline ──────────────────────────────────────
+      - name: Run ETL pipeline
+        env:
+          DATABASE_URL:     ${{ secrets.DATABASE_URL }}
+          NOTIFY_EMAIL:     ${{ secrets.NOTIFY_EMAIL }}
+          SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
+          API_KEY:          ${{ secrets.API_KEY }}
+          APP_ENV:          production
+          LOG_LEVEL:        INFO
+        run: |
+          # Build the CLI flags from workflow inputs
+          FLAGS=""
+
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            FLAGS="$FLAGS --dry-run"
+            echo "Running in DRY RUN mode — no DB writes"
+          fi
+
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then
+            FLAGS="$FLAGS --force"
+            echo "Running in FORCE mode — validation errors will not abort"
+          fi
+
+          python -m src.etl.pipeline $FLAGS
+
+      # ── 5. Upload logs on failure ────────────────────────────────
+      - name: Upload pipeline log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-failure-log-${{ github.run_number }}
+          path: |
+            logs/
+            *.log
+          retention-days: 7
+
+      # ── 6. Job summary ───────────────────────────────────────────
+      - name: Write job summary
+        if: always()
+        run: |
+          echo "## Nigeria Surveillance ETL — Run #${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Trigger   | ${{ github.event_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch    | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Dry run   | ${{ github.event.inputs.dry_run || 'false' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Timestamp | $(date -u '+%Y-%m-%d %H:%M UTC') |" >> $GITHUB_STEP_SUMMARY
