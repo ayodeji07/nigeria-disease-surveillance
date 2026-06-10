@@ -291,10 +291,10 @@ All GET endpoints support `?format=csv` for direct download.
 When NCDC publishes a new situation report, data can be added without any technical knowledge:
 
 1. Open the live dashboard → click **⚙️ Admin** in the sidebar
-2. Enter the admin password
+2. Enter the admin password (session lasts 30 minutes)
 3. Select the disease type from the dropdown
-4. Upload the PDF file
-5. Click **Upload & Process** — rows are loaded into the database immediately
+4. Upload one or more PDF files
+5. Click **Upload & Process** — each file is processed in turn and results shown immediately
 
 Duplicate weeks are skipped automatically, so the same PDF can be uploaded twice safely.
 
@@ -315,7 +315,7 @@ Duplicate weeks are skipped automatically, so the same PDF can be uploaded twice
 
 ## 📄 Policy Brief
 
-A 3-page data-driven policy brief summarising key findings is available in [`reports/policy_brief.pdf`](reports/policy_brief.pdf).
+A data-driven policy brief summarising key findings is available in [`reports/policy_brief.md`](reports/policy_brief.md).
 
 ---
 
