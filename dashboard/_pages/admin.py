@@ -88,7 +88,7 @@ def render() -> None:
     with st.spinner(f"Processing {uploaded_file.name} — this may take up to 60 seconds…"):
         try:
             response = requests.post(
-                f"{api_base}/admin/upload",
+                f"{api_base}/api/v1/admin/upload",
                 headers={"X-API-Key": api_key},
                 data={"disease": disease},
                 files={
