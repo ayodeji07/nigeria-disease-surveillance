@@ -101,10 +101,14 @@ GitHub (source of truth)
 Render (API server)
     │   reads DATABASE_URL secret → connects to Supabase
     │   serves FastAPI at nigeria-disease-api.onrender.com
+    │   └── POST /api/v1/admin/upload (protected by API key)
+    │           extract → clean → load new PDF into Supabase
     │
 Streamlit Cloud (dashboard)
-    │   reads API_BASE_URL + API_KEY secrets
+    │   reads API_BASE_URL + API_KEY + ADMIN_PASSWORD secrets
     │   calls Render API → gets data → renders charts
+    │   └── ⚙️ Admin page (password-protected, 30-min session)
+    │           upload PDFs → calls Render /admin/upload
     │
 Supabase (database)
         stores all disease data, facilities, rainfall
