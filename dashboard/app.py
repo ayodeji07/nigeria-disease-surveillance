@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import streamlit as st
 
-from dashboard._pages import overview, state_view, geo_atlas, forecasting
+from dashboard._pages import overview, state_view, geo_atlas, forecasting, admin
 from dashboard.api_client import get_diseases, get_health
 
 # ── Page configuration ────────────────────────────────────────────
@@ -114,6 +114,7 @@ def _render_sidebar() -> tuple[str, int | None, str]:
                 "🔍 State Deep-Dive",
                 "🗺️ Geospatial Atlas",
                 "🔮 Forecasting",
+                "⚙️ Admin",
             ],
             label_visibility = "collapsed",
         )
@@ -192,6 +193,9 @@ def _route(page: str, year: int | None, disease: str) -> None:
             selected_year    = year,
             selected_disease = disease,
         )
+
+    elif page == "⚙️ Admin":
+        admin.render()
 
     else:
         st.error(f"Unknown page: {page!r}")

@@ -26,7 +26,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from src.api.routes import surveillance, geospatial, analytics
+from src.api.routes import surveillance, geospatial, analytics, admin
 from src.api.schemas import HealthCheck
 from src.db.connection import verify_connection, dispose_engine
 from src.utils.config import settings
@@ -136,7 +136,7 @@ app.add_middleware(
         "http://localhost:8501",
     ],
     allow_credentials = False,      # Cannot be True when allow_origins=["*"]
-    allow_methods     = ["GET"],    # This API is read-only for public endpoints
+    allow_methods     = ["GET", "POST"],  # POST needed for /admin/upload
     allow_headers     = ["*"],
 )
 
@@ -207,6 +207,10 @@ app.include_router(
 )
 app.include_router(
     analytics.router,
+    prefix = API_PREFIX,
+)
+app.include_router(
+    admin.router,
     prefix = API_PREFIX,
 )
 
