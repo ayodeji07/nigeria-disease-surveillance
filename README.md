@@ -271,10 +271,25 @@ Base URL: `https://nigeria-disease-api.onrender.com/api/v1`
 | GET | `/geospatial/accessibility` | Facility access gap analysis |
 | GET | `/geospatial/morans-i` | Spatial autocorrelation |
 | GET | `/health` | API health check |
+| POST | `/admin/upload` | Upload a PDF and run ETL *(requires X-API-Key)* |
 
 Full interactive documentation: [`/docs`](https://nigeria-disease-api.onrender.com/docs)
 
 All GET endpoints support `?format=csv` for direct download.
+
+---
+
+## 📥 Adding New PDF Reports
+
+When NCDC publishes a new situation report, data can be added without any technical knowledge:
+
+1. Open the live dashboard → click **⚙️ Admin** in the sidebar
+2. Enter the admin password
+3. Select the disease type from the dropdown
+4. Upload the PDF file
+5. Click **Upload & Process** — rows are loaded into the database immediately
+
+Duplicate weeks are skipped automatically, so the same PDF can be uploaded twice safely.
 
 ---
 
