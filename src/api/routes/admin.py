@@ -34,7 +34,7 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
-_VALID_DISEASES = list(Diseases().pdf_folder_map.keys())
+_VALID_DISEASES = list(Diseases.pdf_folder_map.keys())
 
 
 @router.post(
