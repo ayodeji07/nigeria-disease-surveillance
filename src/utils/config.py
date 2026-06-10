@@ -42,13 +42,9 @@ load_dotenv(_ENV_FILE)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
-@dataclass(frozen=True)
+@dataclass
 class _Paths:
-    """
-    All filesystem paths used across the project.
-
-    Frozen so paths cannot be accidentally mutated at runtime.
-    """
+    """All filesystem paths used across the project."""
     root: Path = PROJECT_ROOT
     data: Path = PROJECT_ROOT / "data"
     raw: Path = PROJECT_ROOT / "data" / "raw"

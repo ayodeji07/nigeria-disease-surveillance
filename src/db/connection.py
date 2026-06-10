@@ -142,7 +142,11 @@ def get_engine() -> Engine:
     global _engine
 
     if _engine is None:
-        _engine = _build_engine(settings.database_url)
+        # Read DATABASE_URL fresh at creation time so tests can override
+        # os.environ["DATABASE_URL"] before calling this function.
+        import os as _os
+        db_url = _os.environ.get("DATABASE_URL", settings.database_url)
+        _engine = _build_engine(db_url)
         _maybe_enable_postgis(_engine)
         logger.debug("Database engine initialised")
 

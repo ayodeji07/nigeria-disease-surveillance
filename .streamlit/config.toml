@@ -1,0 +1,13 @@
+[browser]
+# Disables the background telemetry connection that delays shutdown
+gatherUsageStats = false
+
+[server]
+headless = true
+# How long (ms) the server waits for WebSocket clients to disconnect on SIGINT
+# Default is 5000; lower it so Ctrl+C exits faster
+maxUploadSize = 50
+
+[runner]
+# Re-run the app faster when a widget changes
+fastReruns = true

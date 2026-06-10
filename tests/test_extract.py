@@ -152,7 +152,9 @@ class TestExtractNcdcPdfs:
     def test_returns_empty_df_when_folder_missing(self, tmp_path):
         """A missing PDF folder should return empty DataFrame, not raise."""
         missing_folder = tmp_path / "nonexistent_disease"
-        result = extract_ncdc_pdfs(missing_folder, "Cholera")
+        # force_download=True bypasses the on-disk cache so the folder
+        # check is actually reached even when cached data exists.
+        result = extract_ncdc_pdfs(missing_folder, "Cholera", force_download=True)
         assert isinstance(result, pd.DataFrame)
         assert result.empty
 
@@ -160,7 +162,7 @@ class TestExtractNcdcPdfs:
         """An existing but empty folder should return empty DataFrame."""
         empty_folder = tmp_path / "empty_disease"
         empty_folder.mkdir()
-        result = extract_ncdc_pdfs(empty_folder, "Cholera")
+        result = extract_ncdc_pdfs(empty_folder, "Cholera", force_download=True)
         assert isinstance(result, pd.DataFrame)
         assert result.empty
 
@@ -218,9 +220,10 @@ class TestExtractWhoData:
     def test_returns_empty_df_when_who_folder_missing(self, tmp_path):
         raw_dir = tmp_path / "raw"
         raw_dir.mkdir()
-        # No 'who' subfolder created
-        with patch("src.etl.extract.Paths.raw", raw_dir):
-            result = extract_who_data()
+        # No 'who' subfolder and no cache; mock the API so no network call
+        with patch("src.etl.extract.Paths.raw", raw_dir), \
+             patch("src.etl.extract._fetch_who_gho_indicator", return_value=[]):
+            result = extract_who_data(force_download=True)
             assert isinstance(result, pd.DataFrame)
             assert result.empty
 

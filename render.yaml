@@ -1,0 +1,25 @@
+# render.yaml — Render.com deployment configuration
+# Docs: https://render.com/docs/blueprint-spec
+#
+# Deploy steps:
+#   1. Push this repo to GitHub
+#   2. Go to dashboard.render.com → New → Blueprint
+#   3. Connect your GitHub repo — Render reads this file automatically
+#   4. Set the two secret env vars (DATABASE_URL, API_KEY) in the dashboard
+
+services:
+  - type: web
+    name: nigeria-disease-api
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false          # Set this manually in the Render dashboard
+      - key: API_KEY
+        sync: false          # Set this manually in the Render dashboard
+      - key: APP_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: INFO

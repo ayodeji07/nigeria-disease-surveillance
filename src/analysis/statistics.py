@@ -105,9 +105,14 @@ class ClusterResult:
 
 # ── Rolling metrics ──────────────────────────────────────────────
 
+def _primary_col(df: pd.DataFrame) -> str:
+    """Return 'primary_cases' if present, else fall back to 'confirmed_cases'."""
+    return "primary_cases" if "primary_cases" in df.columns else "confirmed_cases"
+
+
 def add_rolling_metrics(
     df: pd.DataFrame,
-    case_col: str = "confirmed_cases",
+    case_col: str | None = None,
     window: int = 4,
 ) -> pd.DataFrame:
     """
@@ -137,35 +142,27 @@ def add_rolling_metrics(
     if df.empty:
         return df
 
+    if case_col is None:
+        case_col = _primary_col(df)
+
     data = df.copy().sort_values(["state", "disease", "report_date"])
 
-    def _rolling_for_group(group: pd.DataFrame) -> pd.DataFrame:
-        g = group.copy()
-        g["cases_4wk_avg"] = (
-            g[case_col]
-            .rolling(window=window, min_periods=1)
-            .mean()
-            .round(2)
-        )
-        # pct_change: (current - previous) / previous * 100
-        # Fill inf (division by zero when prev = 0) with NaN
-        raw_pct = g[case_col].pct_change() * 100
-        g["pct_change_wow"] = raw_pct.replace(
-            [np.inf, -np.inf], np.nan
-        ).round(2)
-        return g
+    grp = data.groupby(["state", "disease"])[case_col]
 
-    result = (
-        data
-        .groupby(["state", "disease"], group_keys=False)
-        .apply(_rolling_for_group)
-        .reset_index(drop=True)
+    data["cases_4wk_avg"] = (
+        grp.transform(lambda g: g.rolling(window=window, min_periods=1).mean())
+        .round(2)
+    )
+    data["pct_change_wow"] = (
+        grp.transform(lambda g: g.pct_change() * 100)
+        .replace([np.inf, -np.inf], np.nan)
+        .round(2)
     )
 
     logger.debug(
-        "Rolling metrics added: %d rows, window=%d weeks", len(result), window
+        "Rolling metrics added: %d rows, window=%d weeks", len(data), window
     )
-    return result
+    return data.reset_index(drop=True)
 
 
 # ── Mann-Kendall trend test ──────────────────────────────────────
@@ -213,7 +210,7 @@ def test_trend(
             interpretation="pymannkendall package not available.",
         )
 
-    series = _extract_series(df, disease, state, "confirmed_cases")
+    series = _extract_series(df, disease, state, _primary_col(df))
 
     if len(series) < 8:
         return TrendResult(
@@ -295,8 +292,9 @@ def test_seasonality(
             interpretation="'season' column not present in data.",
         )
 
-    dry_cases   = data[data["season"] == "Dry"]["confirmed_cases"].dropna()
-    rainy_cases = data[data["season"] == "Rainy"]["confirmed_cases"].dropna()
+    col = _primary_col(data)
+    dry_cases   = data[data["season"] == "Dry"][col].dropna()
+    rainy_cases = data[data["season"] == "Rainy"][col].dropna()
 
     if len(dry_cases) < 3 or len(rainy_cases) < 3:
         return SeasonalityResult(
@@ -382,8 +380,8 @@ def test_correlation(
             interpretation=f"Column '{covariate_col}' not found in data.",
         )
 
-    # Drop rows where either variable is missing
-    paired = data[["confirmed_cases", covariate_col]].dropna()
+    col = _primary_col(data)
+    paired = data[[col, covariate_col]].dropna()
 
     if len(paired) < 10:
         return CorrelationResult(
@@ -396,9 +394,7 @@ def test_correlation(
             ),
         )
 
-    rho, p_value = stats.spearmanr(
-        paired["confirmed_cases"], paired[covariate_col]
-    )
+    rho, p_value = stats.spearmanr(paired[col], paired[covariate_col])
 
     significant = p_value < _ALPHA
     direction   = (
@@ -491,10 +487,11 @@ def detect_outbreaks(
         logger.warning("No data for disease '%s' in outbreak detection", disease)
         return alerts
 
+    case_col = _primary_col(disease_df)
     for state_name in disease_df["state"].unique():
         state_series = (
             disease_df[disease_df["state"] == state_name]
-            .sort_values("report_date")["confirmed_cases"]
+            .sort_values("report_date")[case_col]
             .reset_index(drop=True)
         )
         state_dates = (
@@ -648,17 +645,33 @@ def cluster_states(
             cluster_profiles=pd.DataFrame(),
         )
 
+    col = _primary_col(data)
     # Aggregate to one row per state
+    agg_dict: dict = {
+        col:                 "sum",
+        "incidence_per_100k": "mean",
+    }
+    if "deaths" in data.columns:
+        agg_dict["deaths"] = "sum"
     state_agg = (
         data.groupby("state")
-        .agg(
-            total_cases      = ("confirmed_cases",    "sum"),
-            avg_incidence    = ("incidence_per_100k", "mean"),
-            avg_cfr          = ("cfr_pct",            "mean"),
-        )
+        .agg(**{
+            "total_cases":   (col,                   "sum"),
+            "avg_incidence": ("incidence_per_100k",  "mean"),
+            **( {"total_deaths": ("deaths", "sum")} if "deaths" in data.columns else {} ),
+        })
         .reset_index()
         .fillna(0)
     )
+    # Compute CFR as sum(deaths)/sum(cases) to avoid per-row averaging artefacts
+    if "total_deaths" in state_agg.columns:
+        state_agg["avg_cfr"] = np.where(
+            state_agg["total_cases"] > 0,
+            (state_agg["total_deaths"] / state_agg["total_cases"] * 100).round(4),
+            0.0,
+        )
+    else:
+        state_agg["avg_cfr"] = 0.0
 
     if len(state_agg) < n_clusters:
         n_clusters = max(2, len(state_agg) // 2)
@@ -752,25 +765,39 @@ def benchmark_cfr(
     if year and "year" in data.columns:
         data = data[data["year"] == year]
 
-    if data.empty or "cfr_pct" not in data.columns:
+    col = _primary_col(data)
+    if data.empty or col not in data.columns:
         return pd.DataFrame()
 
-    state_cfr = (
-        data.groupby("state")["cfr_pct"]
-        .mean()
-        .reset_index()
-        .rename(columns={"cfr_pct": "avg_cfr"})
-    )
+    if "deaths" in data.columns:
+        state_agg = data.groupby("state").agg(
+            total_cases  = (col,       "sum"),
+            total_deaths = ("deaths",  "sum"),
+        ).reset_index().fillna(0)
+        state_agg["avg_cfr"] = np.where(
+            state_agg["total_cases"] > 0,
+            (state_agg["total_deaths"] / state_agg["total_cases"] * 100).round(4),
+            0.0,
+        )
+        state_cfr = state_agg[["state", "avg_cfr"]]
+    else:
+        state_cfr = (
+            data.groupby("state")["cfr_pct"]
+            .mean()
+            .reset_index()
+            .rename(columns={"cfr_pct": "avg_cfr"})
+        )
 
     national_mean = state_cfr["avg_cfr"].mean()
     national_std  = state_cfr["avg_cfr"].std()
 
     state_cfr["national_mean_cfr"] = round(national_mean, 3)
-    state_cfr["cfr_z_score"] = (
-        (state_cfr["avg_cfr"] - national_mean) / national_std
-        if national_std > 0
-        else 0.0
-    ).round(3)
+    if national_std > 0:
+        state_cfr["cfr_z_score"] = (
+            (state_cfr["avg_cfr"] - national_mean) / national_std
+        ).round(3)
+    else:
+        state_cfr["cfr_z_score"] = 0.0
     state_cfr["flag"] = state_cfr["cfr_z_score"].apply(
         lambda z: "HIGH" if z > 1.0 else ("LOW" if z < -1.0 else "NORMAL")
     )

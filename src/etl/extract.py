@@ -3,18 +3,31 @@ src/etl/extract.py
 ────────────────────────────────────────────────────────────────
 Data extraction — the "E" in ETL.
 
-Each function in this module is responsible for pulling raw data
-from exactly one source and returning it as a pandas DataFrame
-(or GeoDataFrame for spatial data).
+This module fetches raw data from all external sources and saves
+it to data/raw/ as CSV files. No cleaning happens here.
 
-Rules enforced here:
-  • No cleaning happens in extractors. Raw data is returned as-is.
-  • Every extractor saves its output to data/raw/ so re-runs are
-    idempotent — we never need to re-download if the file exists.
-  • If a source is unavailable, we log a warning and return an
-    empty DataFrame so the pipeline can continue gracefully.
-  • All public functions accept a `force_download` flag. When
-    False (default), a cached file in data/raw/ is used.
+Sources:
+  1. NCDC Nigeria PDF Situation Reports  — 5 diseases
+  2. WHO AFRO CSV/Excel files            — cross-validation
+  3. NASA POWER REST API                 — monthly rainfall
+  4. HDX Nigeria                        — health facilities CSV
+  5. NBS / WorldPop                     — state populations
+  6. GRID3 Nigeria                      — state shapefiles
+
+Design:
+  • Every extractor is idempotent — calling it twice produces
+    the same result.
+  • Results are cached to data/raw/ so re-runs are fast.
+  • Pass force_download=True to bypass the cache.
+  • All extractors return a DataFrame (never None, never raise).
+  • Every row has a _source_file column for provenance.
+
+PDF parsing notes:
+  Many NCDC PDFs use CID-encoded fonts for the state breakdown
+  table, which pdfplumber cannot decode. Where this occurs the
+  parser falls back to extracting whatever text IS readable
+  (national totals from the summary table, top-N state lists).
+  See src/etl/pdf_parsers.py for full details.
 ────────────────────────────────────────────────────────────────
 """
 
@@ -27,386 +40,487 @@ from typing import Optional
 import pandas as pd
 import requests
 
-from src.utils.config import (
-    DATA_END_YEAR,
-    DATA_START_YEAR,
-    NASA_API_DELAY_SECONDS,
-    Paths,
-    settings,
-)
+from src.utils.config import Paths, Diseases, settings
 from src.utils.logger import get_logger
 from src.utils.state_maps import CANONICAL_STATES, STATE_CENTROIDS
 
 logger = get_logger(__name__)
 
 
-# ── Internal helpers ─────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
+# INTERNAL HELPERS
+# ────────────────────────────────────────────────────────────────
 
 def _save_raw(df: pd.DataFrame, filename: str) -> Path:
     """
-    Save a DataFrame to data/raw/ as CSV and return the path.
+    Save a DataFrame to data/raw/<filename> as CSV.
 
     Parameters
     ----------
     df : pd.DataFrame
-        The DataFrame to persist.
-    filename : str
-        Target filename, e.g. "ncdc_cholera_raw.csv".
+    filename : str  e.g. 'ncdc_cholera_raw.csv'
 
     Returns
     -------
-    Path
-        The full path where the file was saved.
+    Path  — absolute path of the saved file
     """
-    Paths.raw.mkdir(parents=True, exist_ok=True)
-    dest = Paths.raw / filename
-    df.to_csv(dest, index=False)
-    logger.info("Saved %d rows to %s", len(df), dest.name)
-    return dest
+    out_path = Paths.raw / filename
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_path, index=False)
+    logger.debug("Saved %d rows → %s", len(df), out_path.name)
+    return out_path
 
 
 def _load_cached(filename: str) -> Optional[pd.DataFrame]:
     """
-    Return a cached CSV from data/raw/ if it exists, else None.
-
-    Parameters
-    ----------
-    filename : str
-        The filename to look for in data/raw/.
+    Load a cached CSV from data/raw/<filename>.
 
     Returns
     -------
-    pd.DataFrame | None
+    pd.DataFrame if the file exists, else None.
     """
     path = Paths.raw / filename
     if path.exists():
-        df = pd.read_csv(path)
-        logger.info("Loaded cached file %s (%d rows)", filename, len(df))
-        return df
+        logger.debug("Cache hit: %s", filename)
+        return pd.read_csv(path)
     return None
 
 
-# ── NCDC PDF extractor ───────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
+# 1. NCDC PDF EXTRACTION
+# ────────────────────────────────────────────────────────────────
 
 def extract_ncdc_pdfs(
-    disease_folder: Path,
+    folder: Path,
     disease_name: str,
     force_download: bool = False,
 ) -> pd.DataFrame:
     """
-    Extract all tables from NCDC Situation Report PDFs for one disease.
+    Extract state-level surveillance data from all NCDC PDFs
+    in a disease folder.
 
-    NCDC publishes weekly PDF reports at ncdc.gov.ng/diseases/sitreps.
-    Each PDF typically contains one or more tables with state-level
-    case counts. The tables are inconsistently formatted across years,
-    so we extract everything and leave clean-up to transform.py.
+    The results are cached as data/raw/ncdc_<disease>_raw.csv.
+    Pass force_download=True to re-extract even if cache exists.
 
     Parameters
     ----------
-    disease_folder : Path
-        Directory containing the downloaded PDF files, e.g.
-        data/raw/ncdc_pdfs/cholera/.
+    folder : Path
+        Directory containing NCDC PDF sitreps for one disease.
+        e.g. data/raw/ncdc_pdfs/cholera/
     disease_name : str
-        Human-readable label added as a column, e.g. "Cholera".
+        Disease name — passed to the parser for correct table logic.
     force_download : bool
-        Unused here (PDFs are manually downloaded). Kept for API
-        consistency with other extractors.
 
     Returns
     -------
     pd.DataFrame
-        Combined raw table data from all PDFs, with provenance
-        columns (_source_file, _page_number, _table_index) so
-        any row can be traced back to its source.
+        All rows extracted across all PDFs, with provenance columns.
+        Empty DataFrame if no PDFs found or all fail.
     """
-    cache_file = f"ncdc_{disease_name.lower().replace(' ', '_')}_raw.csv"
+    cache_key = f"ncdc_{disease_name.lower().replace(' ', '_')}_raw.csv"
 
     if not force_download:
-        cached = _load_cached(cache_file)
+        cached = _load_cached(cache_key)
         if cached is not None:
+            logger.info(
+                "NCDC %s: loaded %d rows from cache",
+                disease_name, len(cached),
+            )
             return cached
 
-    try:
-        import pdfplumber
-    except ImportError:
-        logger.error(
-            "pdfplumber is not installed. Run: pip install pdfplumber"
-        )
-        return pd.DataFrame()
-
-    if not disease_folder.exists():
+    if not folder.exists():
         logger.warning(
-            "PDF folder not found: %s. "
-            "Download NCDC sitreps and place them there.",
-            disease_folder,
+            "PDF folder not found: %s  "
+            "(Create it and place NCDC sitreps there)",
+            folder,
         )
         return pd.DataFrame()
 
-    pdf_files = sorted(disease_folder.glob("*.pdf"))
+    pdf_files = sorted(folder.glob("*.pdf"))
     if not pdf_files:
-        logger.warning("No PDF files found in %s", disease_folder)
+        logger.warning(
+            "No PDF files in %s  "
+            "(Download from ncdc.gov.ng/reports)",
+            folder,
+        )
         return pd.DataFrame()
 
     logger.info(
-        "Extracting %d PDFs for %s", len(pdf_files), disease_name
+        "NCDC %s: extracting %d PDFs from %s",
+        disease_name, len(pdf_files), folder,
     )
 
-    all_rows: list[pd.DataFrame] = []
-
+    all_frames: list[pd.DataFrame] = []
     for pdf_path in pdf_files:
-        rows_from_file = _extract_single_pdf(pdf_path, disease_name)
-        if not rows_from_file.empty:
-            all_rows.append(rows_from_file)
+        df = _extract_single_pdf(pdf_path, disease_name)
+        if not df.empty:
+            all_frames.append(df)
 
-    if not all_rows:
-        logger.warning("No tables extracted for %s", disease_name)
+    if not all_frames:
+        logger.warning(
+            "NCDC %s: no data extracted from %d PDFs",
+            disease_name, len(pdf_files),
+        )
         return pd.DataFrame()
 
-    combined = pd.concat(all_rows, ignore_index=True)
-    _save_raw(combined, cache_file)
+    combined = pd.concat(all_frames, ignore_index=True)
+    _save_raw(combined, cache_key)
+    logger.info(
+        "NCDC %s: extracted %d rows from %d PDFs",
+        disease_name, len(combined), len(pdf_files),
+    )
     return combined
 
 
 def _extract_single_pdf(pdf_path: Path, disease_name: str) -> pd.DataFrame:
     """
-    Extract all tables from one PDF file.
+    Extract state-level surveillance data from one NCDC PDF.
+
+    Uses disease-specific parsers (src/etl/pdf_parsers.py) that
+    understand the exact table structure of each NCDC report type.
+
+    Many NCDC PDFs use CID-encoded fonts for the main state
+    breakdown table. Where this occurs, the parser falls back to
+    extracting data from whatever text IS readable.
 
     Parameters
     ----------
     pdf_path : Path
-        Absolute path to the PDF.
     disease_name : str
-        Added as a column to every extracted row.
 
     Returns
     -------
     pd.DataFrame
-        All tables from this PDF concatenated into one DataFrame.
+        state | disease | epi_week | year | suspected_cases |
+        confirmed_cases | deaths | cfr_pct | _source_file | _data_type
     """
-    import pdfplumber
+    try:
+        import pdfplumber
+    except ImportError:
+        logger.error("pdfplumber not installed — run: pip install pdfplumber")
+        return pd.DataFrame()
 
-    tables_found: list[pd.DataFrame] = []
+    from src.etl.pdf_parsers import parse_pdf_by_disease
+
+    raw_tables: list[list[list]] = []
+    page_texts: list[str]        = []
 
     try:
         with pdfplumber.open(pdf_path) as pdf:
             logger.debug(
-                "  Reading %s (%d pages)", pdf_path.name, len(pdf.pages)
+                "  Parsing %s (%d pages) [%s]",
+                pdf_path.name, len(pdf.pages), disease_name,
             )
-            for page_num, page in enumerate(pdf.pages, start=1):
-                raw_tables = page.extract_tables()
-                if not raw_tables:
-                    continue
-
-                for table_idx, raw_table in enumerate(raw_tables):
-                    # Skip tables that are too small to be meaningful
-                    if not raw_table or len(raw_table) < 2:
-                        continue
-
-                    header = raw_table[0]
-                    rows = raw_table[1:]
-
-                    # Guard against rows with wrong column count
-                    consistent_rows = [
-                        r for r in rows if len(r) == len(header)
-                    ]
-                    if not consistent_rows:
-                        continue
-
-                    df = pd.DataFrame(consistent_rows, columns=header)
-                    df["_disease"]      = disease_name
-                    df["_source_file"]  = pdf_path.name
-                    df["_page_number"]  = page_num
-                    df["_table_index"]  = table_idx
-                    tables_found.append(df)
+            for page in pdf.pages:
+                tbls = page.extract_tables()
+                if tbls:
+                    raw_tables.extend(tbls)
+                # Use word-level extraction for better CID font handling
+                words = page.extract_words()
+                page_texts.append(
+                    " ".join(w["text"] for w in words) if words else ""
+                )
 
     except Exception as exc:
-        # Log but don't crash — one bad PDF shouldn't stop the pipeline
-        logger.error("Failed to read %s: %s", pdf_path.name, exc)
-
-    if not tables_found:
+        logger.error("Failed to open %s: %s", pdf_path.name, exc)
         return pd.DataFrame()
 
-    return pd.concat(tables_found, ignore_index=True)
+    result = parse_pdf_by_disease(
+        raw_tables   = raw_tables,
+        disease_name = disease_name,
+        pdf_path     = pdf_path,
+        page_texts   = page_texts,
+    )
+
+    if result.empty:
+        logger.warning(
+            "No rows extracted from %s (%s)",
+            pdf_path.name, disease_name,
+        )
+    else:
+        logger.debug(
+            "  %d rows from %s", len(result), pdf_path.name,
+        )
+
+    return result
 
 
-# ── WHO AFRO extractor ───────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
+# 2. WHO GHO DATA
+# ────────────────────────────────────────────────────────────────
+
+# WHO Global Health Observatory OData API — no auth required
+_WHO_GHO_BASE    = "https://ghoapi.azureedge.net/api"
+_WHO_GHO_COUNTRY = "NGA"
+
+# Indicator codes for annual national totals (both sexes)
+_WHO_GHO_INDICATORS: dict[str, dict[str, str]] = {
+    "Cholera": {
+        "cases":  "CHOLERA_0000000001",
+        "deaths": "CHOLERA_0000000002",
+    },
+}
+
+
+def _fetch_who_gho_indicator(code: str) -> list[dict]:
+    """
+    Fetch one WHO GHO indicator for Nigeria from the OData API.
+
+    Returns the raw list of value dicts, or [] on any error.
+    """
+    url = (
+        f"{_WHO_GHO_BASE}/{code}"
+        f"?$filter=SpatialDim eq '{_WHO_GHO_COUNTRY}'"
+    )
+    try:
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        return resp.json().get("value", [])
+    except requests.exceptions.Timeout:
+        logger.warning("WHO GHO timeout for indicator %s", code)
+        return []
+    except Exception as exc:
+        logger.warning("WHO GHO fetch failed for %s: %s", code, exc)
+        return []
+
 
 def extract_who_data(force_download: bool = False) -> pd.DataFrame:
     """
-    Load WHO AFRO disease surveillance files from data/raw/who/.
+    Fetch WHO annual surveillance data for Nigeria from the WHO GHO API.
 
-    WHO data serves as a cross-validation source for NCDC figures.
-    Supported formats: CSV, Excel (.xlsx, .xls).
+    Queries the WHO Global Health Observatory OData API — no login or
+    manual download required. Results are cached as who_raw.csv.
+
+    If local files exist in data/raw/who/ they are loaded instead of
+    calling the API (useful for air-gapped environments).
+
+    Diseases covered: Cholera (cases and deaths).
 
     Parameters
     ----------
     force_download : bool
-        When False, returns a cached version if available.
+        If False (default), return cached who_raw.csv if it exists.
 
     Returns
     -------
     pd.DataFrame
-        All WHO files concatenated with a _source_file column.
+        Columns: year | disease | reported_cases | reported_deaths |
+                 _source_file
+        One row per year per disease. Empty DataFrame if API is
+        unreachable and no cache or local files exist.
     """
-    cache_file = "who_raw.csv"
+    cache_key = "who_raw.csv"
 
     if not force_download:
-        cached = _load_cached(cache_file)
+        cached = _load_cached(cache_key)
         if cached is not None:
+            logger.info("WHO: loaded %d rows from cache", len(cached))
             return cached
 
+    # ── Prefer local files if the user has placed any ──────────────
     who_dir = Paths.raw / "who"
-    if not who_dir.exists():
+    if who_dir.exists():
+        local_files = (
+            list(who_dir.glob("*.csv")) + list(who_dir.glob("*.xlsx"))
+        )
+        if local_files:
+            frames: list[pd.DataFrame] = []
+            for fpath in local_files:
+                try:
+                    df = (
+                        pd.read_csv(fpath)
+                        if fpath.suffix == ".csv"
+                        else pd.read_excel(fpath)
+                    )
+                    df["_source_file"] = fpath.name
+                    frames.append(df)
+                    logger.info(
+                        "WHO: loaded %d rows from local file %s",
+                        len(df), fpath.name,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "WHO: could not read %s: %s", fpath.name, exc
+                    )
+            if frames:
+                combined = pd.concat(frames, ignore_index=True)
+                _save_raw(combined, cache_key)
+                return combined
+
+    # ── Fall back to WHO GHO API ───────────────────────────────────
+    logger.info(
+        "WHO: fetching data from WHO GHO API for Nigeria "
+        "(no local files found)..."
+    )
+
+    # Collect cases and deaths per year for each disease
+    yearly: dict[tuple[str, int], dict] = {}
+
+    for disease, indicators in _WHO_GHO_INDICATORS.items():
+        for metric, code in indicators.items():
+            values = _fetch_who_gho_indicator(code)
+            logger.info(
+                "WHO GHO %s %s (%s): %d records returned",
+                disease, metric, code, len(values),
+            )
+            for record in values:
+                # Keep both-sex aggregate (Dim1='BTSX') or null-sex rows
+                dim1 = record.get("Dim1") or "BTSX"
+                if dim1 not in ("BTSX", ""):
+                    continue
+                year = record.get("TimeDim")
+                val  = record.get("NumericValue")
+                if year is None or val is None:
+                    continue
+                key = (disease, int(year))
+                if key not in yearly:
+                    yearly[key] = {
+                        "year":             int(year),
+                        "disease":          disease,
+                        "reported_cases":   0,
+                        "reported_deaths":  0,
+                        "_source_file":     "WHO_GHO_API",
+                    }
+                if metric == "cases":
+                    yearly[key]["reported_cases"]  = int(val)
+                else:
+                    yearly[key]["reported_deaths"] = int(val)
+
+    if not yearly:
         logger.warning(
-            "WHO data directory not found: %s. "
-            "Download files from afro.who.int and place them there.",
-            who_dir,
+            "WHO GHO: no data returned. "
+            "Check network connectivity or place files in data/raw/who/."
         )
         return pd.DataFrame()
 
-    dfs: list[pd.DataFrame] = []
-
-    for csv_file in sorted(who_dir.glob("*.csv")):
-        try:
-            df = pd.read_csv(csv_file)
-            df["_source_file"] = csv_file.name
-            dfs.append(df)
-            logger.debug("  Loaded WHO CSV: %s (%d rows)", csv_file.name, len(df))
-        except Exception as exc:
-            logger.error("Could not read %s: %s", csv_file.name, exc)
-
-    for excel_file in sorted(who_dir.glob("*.xlsx")):
-        try:
-            df = pd.read_excel(excel_file, engine="openpyxl")
-            df["_source_file"] = excel_file.name
-            dfs.append(df)
-            logger.debug("  Loaded WHO Excel: %s (%d rows)", excel_file.name, len(df))
-        except Exception as exc:
-            logger.error("Could not read %s: %s", excel_file.name, exc)
-
-    if not dfs:
-        logger.warning("No WHO files found in %s", who_dir)
-        return pd.DataFrame()
-
-    combined = pd.concat(dfs, ignore_index=True)
-    _save_raw(combined, cache_file)
-    return combined
+    result = (
+        pd.DataFrame(list(yearly.values()))
+        .sort_values(["disease", "year"])
+        .reset_index(drop=True)
+    )
+    _save_raw(result, cache_key)
+    logger.info(
+        "WHO GHO: %d rows fetched and cached as %s",
+        len(result), cache_key,
+    )
+    return result
 
 
-# ── NASA POWER rainfall extractor ────────────────────────────────
+# ────────────────────────────────────────────────────────────────
+# 3. NASA POWER RAINFALL API
+# ────────────────────────────────────────────────────────────────
 
 def extract_nasa_rainfall(
-    start_year: int = DATA_START_YEAR,
-    end_year: int = DATA_END_YEAR,
+    start_year:     int  = 2015,
+    end_year:       int  = 2024,
     force_download: bool = False,
 ) -> pd.DataFrame:
     """
-    Fetch monthly precipitation data for all 37 states via NASA POWER API.
+    Fetch monthly precipitation per Nigerian state from NASA POWER.
 
-    NASA POWER (Prediction of Worldwide Energy Resources) provides free
-    meteorological data. We use the monthly precipitation parameter
-    "PRECTOTCORR" (precipitation corrected, mm/month) at each state's
-    centroid coordinate.
+    Queries the POWER API for each state centroid. Adds a 2-second
+    delay between requests to respect the rate limit (~30 req/min).
 
-    No API key is required. Rate limit: ~30 requests/minute.
-    We insert a short delay between requests to be a good citizen.
+    No API key required.
 
     Parameters
     ----------
     start_year : int
-        First year to fetch (inclusive).
     end_year : int
-        Last year to fetch (inclusive).
     force_download : bool
-        When False, return cached data if it exists.
 
     Returns
     -------
     pd.DataFrame
-        Columns: state, year, month, rainfall_mm, latitude, longitude.
+        Columns: state | year | month | rainfall_mm | latitude | longitude
     """
-    cache_file = "rainfall_raw.csv"
+    cache_key = "rainfall_raw.csv"
 
     if not force_download:
-        cached = _load_cached(cache_file)
+        cached = _load_cached(cache_key)
         if cached is not None:
+            logger.info(
+                "Rainfall: loaded %d rows from cache", len(cached)
+            )
             return cached
 
     logger.info(
-        "Fetching NASA POWER rainfall for %d states (%d–%d)...",
+        "Rainfall: fetching %d states × %d years from NASA POWER...",
         len(STATE_CENTROIDS),
-        start_year,
-        end_year,
+        end_year - start_year + 1,
     )
 
-    all_records: list[pd.DataFrame] = []
-    failed_states: list[str] = []
-
-    for i, (state, (lat, lon)) in enumerate(STATE_CENTROIDS.items(), start=1):
-        logger.info("  [%d/%d] %s", i, len(STATE_CENTROIDS), state)
-
-        df = _fetch_one_state_rainfall(state, lat, lon, start_year, end_year)
-
-        if df.empty:
-            failed_states.append(state)
-        else:
-            all_records.append(df)
-
-        # Be respectful of the API rate limit
-        time.sleep(NASA_API_DELAY_SECONDS)
-
-    if failed_states:
-        logger.warning(
-            "Rainfall fetch failed for %d states: %s",
-            len(failed_states),
-            ", ".join(failed_states),
+    frames: list[pd.DataFrame] = []
+    for i, (state_name, (lat, lon)) in enumerate(STATE_CENTROIDS.items()):
+        df = _fetch_one_state_rainfall(
+            state      = state_name,
+            lat        = lat,
+            lon        = lon,
+            start_year = start_year,
+            end_year   = end_year,
         )
+        if not df.empty:
+            frames.append(df)
+            logger.debug(
+                "  Rainfall %s: %d rows", state_name, len(df)
+            )
 
-    if not all_records:
-        logger.error("No rainfall data retrieved — check network access.")
+        # Progress indicator every 10 states
+        if (i + 1) % 10 == 0:
+            logger.info(
+                "  Rainfall: %d/%d states fetched",
+                i + 1, len(STATE_CENTROIDS),
+            )
+
+        # Rate limit: 2 second delay between requests
+        if i < len(STATE_CENTROIDS) - 1:
+            time.sleep(2.2)
+
+    if not frames:
+        logger.warning("Rainfall: no data retrieved from NASA POWER")
         return pd.DataFrame()
 
-    combined = pd.concat(all_records, ignore_index=True)
-    _save_raw(combined, cache_file)
+    combined = pd.concat(frames, ignore_index=True)
+    _save_raw(combined, cache_key)
     logger.info(
-        "Rainfall extraction complete: %d records across %d states",
-        len(combined),
-        combined["state"].nunique(),
+        "Rainfall: %d rows for %d states saved",
+        len(combined), combined["state"].nunique(),
     )
     return combined
 
 
 def _fetch_one_state_rainfall(
-    state: str,
-    lat: float,
-    lon: float,
+    state:      str,
+    lat:        float,
+    lon:        float,
     start_year: int,
-    end_year: int,
+    end_year:   int,
+    max_retries: int = 3,
 ) -> pd.DataFrame:
     """
-    Fetch monthly rainfall for a single state from the NASA POWER API.
+    Fetch monthly rainfall for one state centroid from NASA POWER.
+
+    Uses the PRECTOTCORR parameter (precipitation corrected, mm/month).
+    The NASA fill value is -999 — replaced with NaN in transform.py.
+
+    Retries up to max_retries times on timeout or connection errors,
+    with exponential backoff (5s, 10s, 20s).
 
     Parameters
     ----------
     state : str
-        Canonical state name — used as a label in the output.
-    lat : float
-        Centroid latitude in decimal degrees.
-    lon : float
-        Centroid longitude in decimal degrees.
-    start_year : int
-        First year.
-    end_year : int
-        Last year.
+    lat, lon : float  — state centroid coordinates (WGS84)
+    start_year, end_year : int
+    max_retries : int
 
     Returns
     -------
     pd.DataFrame
-        Columns: state, year, month, rainfall_mm, latitude, longitude.
-        Returns empty DataFrame on any failure.
+        Columns: state | year | month | rainfall_mm | latitude | longitude
+        Empty DataFrame if all attempts fail.
     """
     url = (
-        f"https://power.larc.nasa.gov/api/temporal/monthly/point"
+        "https://power.larc.nasa.gov/api/temporal/monthly/point"
         f"?parameters=PRECTOTCORR"
         f"&community=AG"
         f"&longitude={lon}"
@@ -416,219 +530,299 @@ def _fetch_one_state_rainfall(
         f"&format=JSON"
     )
 
-    try:
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        payload = response.json()
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.get(url, timeout=45)
+            if not response.ok:
+                logger.warning(
+                    "NASA POWER %s HTTP %s — body: %s",
+                    state, response.status_code,
+                    response.text[:500],
+                )
+                return pd.DataFrame()
 
-        # The API nests data under properties → parameter → PRECTOTCORR
-        # Keys are in "YYYYMM" string format, values are mm/month floats
-        rain_dict: dict[str, float] = (
-            payload["properties"]["parameter"]["PRECTOTCORR"]
-        )
-
-        records = []
-        for year_month_str, rainfall_mm in rain_dict.items():
-            records.append(
-                {
-                    "state":       state,
-                    "year":        int(year_month_str[:4]),
-                    "month":       int(year_month_str[4:]),
-                    "rainfall_mm": rainfall_mm,
-                    "latitude":    lat,
-                    "longitude":   lon,
-                }
+            data = response.json()
+            rainfall_data = (
+                data
+                .get("properties", {})
+                .get("parameter", {})
+                .get("PRECTOTCORR", {})
             )
 
-        return pd.DataFrame(records)
+            if not rainfall_data:
+                logger.warning(
+                    "NASA POWER: no PRECTOTCORR data for %s", state
+                )
+                return pd.DataFrame()
 
-    except requests.exceptions.Timeout:
-        logger.warning("NASA API timed out for %s — skipping", state)
-    except requests.exceptions.HTTPError as exc:
-        logger.warning("NASA API HTTP error for %s: %s", state, exc)
-    except (KeyError, ValueError) as exc:
-        logger.warning("NASA API unexpected response for %s: %s", state, exc)
-    except Exception as exc:
-        logger.error("Unexpected error fetching rainfall for %s: %s", state, exc)
+            rows = []
+            for yyyymm, value in rainfall_data.items():
+                try:
+                    year  = int(yyyymm[:4])
+                    month = int(yyyymm[4:])
+                    if not 1 <= month <= 12:
+                        continue
+                    rows.append({
+                        "state":        state,
+                        "year":         year,
+                        "month":        month,
+                        "rainfall_mm":  float(value),
+                        "latitude":     lat,
+                        "longitude":    lon,
+                    })
+                except (ValueError, IndexError):
+                    continue
+
+            return pd.DataFrame(rows)
+
+        except (requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError) as exc:
+            wait = 5 * (2 ** (attempt - 1))   # 5s, 10s, 20s
+            if attempt < max_retries:
+                logger.warning(
+                    "NASA POWER %s attempt %d/%d failed (%s) — "
+                    "retrying in %ds",
+                    state, attempt, max_retries, exc.__class__.__name__, wait,
+                )
+                time.sleep(wait)
+            else:
+                logger.warning(
+                    "NASA POWER %s failed after %d attempts: %s",
+                    state, max_retries, exc,
+                )
+                return pd.DataFrame()
+
+        except requests.exceptions.RequestException as exc:
+            logger.warning(
+                "NASA POWER request failed for %s: %s", state, exc
+            )
+            return pd.DataFrame()
+
+        except Exception as exc:
+            logger.warning(
+                "Unexpected error fetching rainfall for %s: %s", state, exc
+            )
+            return pd.DataFrame()
 
     return pd.DataFrame()
 
 
-# ── HDX health facilities extractor ──────────────────────────────
+# ────────────────────────────────────────────────────────────────
+# 4. HEALTH FACILITIES (HDX)
+# ────────────────────────────────────────────────────────────────
 
 def extract_health_facilities(force_download: bool = False) -> pd.DataFrame:
     """
-    Load Nigeria health facility locations from a local file.
+    Load health facility locations from data/raw/health_facilities.csv.
 
-    Source: Humanitarian Data Exchange (data.humdata.org)
-    Search term: "Nigeria health facilities"
-    Download the CSV and place it at: data/raw/health_facilities.csv
-
-    The file contains facility names, types (hospital, PHC, clinic),
-    ownership (Federal, State, Private), LGA, state, and coordinates.
+    The file is manually downloaded from HDX Nigeria:
+    https://data.humdata.org  (search: 'Nigeria health facilities')
 
     Parameters
     ----------
     force_download : bool
-        Unused — facilities data is manually downloaded.
+        If False, return cached data if it exists.
 
     Returns
     -------
     pd.DataFrame
-        Raw facilities data with _source_file column.
+        Columns vary by source file but always include _source_file.
+        Empty DataFrame if file not found.
     """
-    cache_file = "health_facilities.csv"
-    path = Paths.raw / cache_file
+    cache_key = "health_facilities_raw.csv"
 
-    if not path.exists():
-        logger.warning(
-            "Health facilities file not found at %s. "
-            "Download from data.humdata.org (search 'Nigeria health facilities') "
-            "and save as data/raw/health_facilities.csv.",
-            path,
-        )
-        return pd.DataFrame()
+    if not force_download:
+        cached = _load_cached(cache_key)
+        if cached is not None:
+            return cached
 
-    try:
-        df = pd.read_csv(path)
-        df["_source_file"] = cache_file
-        logger.info(
-            "Loaded health facilities: %d records, %d columns",
-            len(df),
-            df.shape[1],
-        )
-        return df
-    except Exception as exc:
-        logger.error("Could not load health facilities: %s", exc)
-        return pd.DataFrame()
+    # Try several possible filenames
+    candidates = [
+        Paths.raw / "health_facilities.csv",
+        Paths.raw / "nigeria_health_facilities.csv",
+        Paths.raw / "NGA_facilities.csv",
+    ]
 
-
-# ── NBS population extractor ─────────────────────────────────────
-
-def extract_population(force_download: bool = False) -> pd.DataFrame:
-    """
-    Load Nigeria state population estimates.
-
-    Source: National Bureau of Statistics (nigerianstat.gov.ng)
-    or WorldPop (worldpop.org). Download an Excel or CSV file with
-    at minimum two columns: state name and population estimate.
-
-    Place the file at: data/raw/nigeria_population.xlsx (or .csv)
-
-    Parameters
-    ----------
-    force_download : bool
-        Unused — population data is manually downloaded.
-
-    Returns
-    -------
-    pd.DataFrame
-        Raw population data with _source_file column.
-    """
-    # Try Excel first, then CSV
-    for filename in ("nigeria_population.xlsx", "nigeria_population.csv"):
-        path = Paths.raw / filename
-        if not path.exists():
-            continue
-
-        try:
-            if filename.endswith(".xlsx"):
-                df = pd.read_excel(path, engine="openpyxl")
-            else:
-                df = pd.read_csv(path)
-
-            df["_source_file"] = filename
-            logger.info(
-                "Loaded population data: %d rows from %s", len(df), filename
-            )
-            return df
-
-        except Exception as exc:
-            logger.error("Could not load %s: %s", filename, exc)
+    for fpath in candidates:
+        if fpath.exists():
+            try:
+                df = pd.read_csv(fpath, low_memory=False)
+                df["_source_file"] = fpath.name
+                _save_raw(df, cache_key)
+                logger.info(
+                    "Facilities: loaded %d rows from %s",
+                    len(df), fpath.name,
+                )
+                return df
+            except Exception as exc:
+                logger.warning("Could not read %s: %s", fpath.name, exc)
 
     logger.warning(
-        "Population file not found. Expected: data/raw/nigeria_population.xlsx "
-        "Download from nigerianstat.gov.ng or worldpop.org."
+        "Health facilities file not found. "
+        "Download from data.humdata.org and save as "
+        "data/raw/health_facilities.csv"
     )
     return pd.DataFrame()
 
 
-# ── GRID3 shapefile extractor ────────────────────────────────────
+# ────────────────────────────────────────────────────────────────
+# 5. POPULATION DATA (NBS / WorldPop)
+# ────────────────────────────────────────────────────────────────
+
+def extract_population(force_download: bool = False) -> pd.DataFrame:
+    """
+    Load Nigerian state population estimates.
+
+    Tries Excel first (preferred), then CSV.
+    The file is manually downloaded from:
+      - NBS: nigerianstat.gov.ng
+      - WorldPop: worldpop.org
+
+    Parameters
+    ----------
+    force_download : bool
+
+    Returns
+    -------
+    pd.DataFrame
+        Raw population table with _source_file column.
+        Empty DataFrame if no file found.
+    """
+    cache_key = "population_raw.csv"
+
+    if not force_download:
+        cached = _load_cached(cache_key)
+        if cached is not None:
+            return cached
+
+    # Try Excel first, then CSV
+    candidates = [
+        (Paths.raw / "nigeria_population.xlsx",  "excel"),
+        (Paths.raw / "nigeria_population.xls",   "excel"),
+        (Paths.raw / "nigeria_population.csv",   "csv"),
+        (Paths.raw / "NGA_population.xlsx",      "excel"),
+        (Paths.raw / "NGA_population.csv",       "csv"),
+    ]
+
+    for fpath, ftype in candidates:
+        if fpath.exists():
+            try:
+                df = pd.read_excel(fpath) if ftype == "excel" \
+                     else pd.read_csv(fpath)
+                df["_source_file"] = fpath.name
+                _save_raw(df, cache_key)
+                logger.info(
+                    "Population: loaded %d rows from %s",
+                    len(df), fpath.name,
+                )
+                return df
+            except Exception as exc:
+                logger.warning(
+                    "Could not read %s: %s", fpath.name, exc
+                )
+
+    logger.warning(
+        "Population file not found. "
+        "Download from nigerianstat.gov.ng and save as "
+        "data/raw/nigeria_population.xlsx"
+    )
+    return pd.DataFrame()
+
+
+# ────────────────────────────────────────────────────────────────
+# 6. SHAPEFILES (GRID3 Nigeria)
+# ────────────────────────────────────────────────────────────────
 
 def extract_shapefiles() -> dict[str, "gpd.GeoDataFrame"]:
     """
-    Load Nigeria state and LGA boundary shapefiles.
+    Load Nigerian state boundary shapefiles into GeoDataFrames.
 
-    Source: GRID3 Nigeria (grid3.org) or GADM (gadm.org/country/NGA)
-    Download and extract into: data/shapefiles/
+    Automatically reprojects to WGS84 (EPSG:4326) if needed.
 
-    Expected files:
-      - data/shapefiles/nigeria_states.shp  (state boundaries)
-      - data/shapefiles/nigeria_lgas.shp    (LGA boundaries, optional)
-
-    All geometries are reprojected to WGS84 (EPSG:4326) which is
-    what PostGIS and Folium/Leaflet maps expect.
+    Download from: grid3.org or gadm.org/country/NGA
+    Save to: data/shapefiles/nigeria_states.shp
+             (+ .shx, .dbf, .prj files in the same folder)
 
     Returns
     -------
     dict[str, gpd.GeoDataFrame]
-        Keys: "states", "lgas" (if available).
-        Returns empty dict if geopandas is not installed.
+        Keys: 'states' (and 'lgas' if LGA file found)
+        Empty dict if geopandas not installed or no files found.
     """
     try:
         import geopandas as gpd
     except ImportError:
-        logger.error(
-            "geopandas is not installed. Run: pip install geopandas"
+        logger.warning(
+            "geopandas not installed — shapefiles not loaded. "
+            "Run: pip install geopandas"
         )
         return {}
 
     result: dict[str, gpd.GeoDataFrame] = {}
 
-    shapefile_map = {
-        "states": Paths.shapefiles / "nigeria_states.shp",
-        "lgas":   Paths.shapefiles / "nigeria_lgas.shp",
-    }
+    shp_dir = Paths.shapefiles
+    if not shp_dir.exists():
+        logger.warning(
+            "Shapefiles directory not found: %s  "
+            "(Create it and place GRID3 shapefiles there)",
+            shp_dir,
+        )
+        return {}
 
-    for key, shp_path in shapefile_map.items():
-        if not shp_path.exists():
-            if key == "states":
-                logger.warning(
-                    "State shapefile not found: %s. "
-                    "Download from grid3.org or gadm.org",
-                    shp_path,
-                )
-            else:
-                logger.debug("Optional LGA shapefile not found: %s", shp_path)
-            continue
-
-        try:
-            gdf = gpd.read_file(shp_path)
-
-            # Ensure coordinates are in WGS84 — required for PostGIS
-            # and consistent with all other spatial data in this project
-            if gdf.crs is None:
-                logger.warning(
-                    "%s has no CRS defined — assuming WGS84", shp_path.name
-                )
-                gdf = gdf.set_crs(epsg=4326)
-            elif gdf.crs.to_epsg() != 4326:
+    def _load_shp(
+        candidates: list[Path],
+        label: str,
+        exclude: Path | None = None,
+    ) -> "tuple[gpd.GeoDataFrame | None, Path | None]":
+        """
+        Try each candidate path; if none match, fall back to any .shp in
+        the folder (excluding `exclude`). Returns (GeoDataFrame, path) or
+        (None, None).
+        """
+        search_paths = list(dict.fromkeys(candidates + sorted(shp_dir.glob("*.shp"))))
+        for shp_path in search_paths:
+            if not shp_path.exists() or shp_path == exclude:
+                continue
+            try:
+                gdf = gpd.read_file(shp_path)
+                if gdf.crs and gdf.crs.to_epsg() != 4326:
+                    gdf = gdf.to_crs(epsg=4326)
                 logger.info(
-                    "Reprojecting %s from %s to WGS84",
-                    shp_path.name,
-                    gdf.crs.to_string(),
+                    "Shapefiles: loaded %d %s features from %s (CRS=%s)",
+                    len(gdf), label, shp_path.name, gdf.crs,
                 )
-                gdf = gdf.to_crs(epsg=4326)
+                return gdf, shp_path
+            except Exception as exc:
+                logger.warning(
+                    "Could not read shapefile %s: %s", shp_path.name, exc
+                )
+        return None, None
 
-            result[key] = gdf
-            logger.info(
-                "Loaded %s shapefile: %d features, CRS=%s",
-                key,
-                len(gdf),
-                gdf.crs,
-            )
+    # State-level shapefile
+    state_candidates = [
+        shp_dir / "nigeria_states.shp",
+        shp_dir / "NGA_adm1.shp",
+        shp_dir / "gadm41_NGA_1.shp",
+    ]
+    gdf_states, states_path = _load_shp(state_candidates, "state")
+    if gdf_states is not None:
+        result["states"] = gdf_states
 
-        except Exception as exc:
-            logger.error("Failed to load %s: %s", shp_path.name, exc)
+    # LGA-level shapefile (optional — only if a second distinct .shp exists)
+    lga_candidates = [
+        shp_dir / "nigeria_lgas.shp",
+        shp_dir / "NGA_adm2.shp",
+        shp_dir / "gadm41_NGA_2.shp",
+    ]
+    gdf_lgas, _ = _load_shp(lga_candidates, "LGA", exclude=states_path)
+    if gdf_lgas is not None:
+        result["lgas"] = gdf_lgas
+
+    if not result:
+        logger.warning(
+            "No shapefiles found in %s. "
+            "Download from grid3.org and place .shp files there.",
+            shp_dir,
+        )
 
     return result

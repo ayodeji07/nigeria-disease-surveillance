@@ -192,7 +192,7 @@ The pipeline cannot work without them.
 
 ### 2.1 NCDC Situation Reports (PDFs)
 
-1. Go to [ncdc.gov.ng/diseases/sitreps](https://ncdc.gov.ng/diseases/sitreps)
+1. Go to [ncdc.gov.ng/diseases/sitreps  (also try: ncdc.gov.ng/reports)](https://ncdc.gov.ng/diseases/sitreps  (also try: ncdc.gov.ng/reports))
 2. Download weekly situation reports for each disease
 3. Place them in the correct folder:
 

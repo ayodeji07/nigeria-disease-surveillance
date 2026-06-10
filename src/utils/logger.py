@@ -62,6 +62,12 @@ def _setup_root_logger(level: str = "INFO") -> None:
     # Always log to stdout so Docker / cloud platforms capture it
     root.addHandler(_build_handler(sys.stdout))
 
+    # ── Third-party log noise suppression ─────────────────────────
+    # pdfminer (used by pdfplumber) emits WARNINGs when CID-encoded
+    # fonts lack FontBBox metadata. This is cosmetic — extraction
+    # still works — so raise its level above WARNING.
+    logging.getLogger("pdfminer").setLevel(logging.ERROR)
+
 
 # Run setup when this module is first imported
 _setup_root_logger()

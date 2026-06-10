@@ -6,6 +6,7 @@
 .env
 *.pem
 *.key
+.streamlit/secrets.toml
 
 # ── Raw data — too large and may contain sensitive info ───────
 data/raw/
@@ -39,7 +40,7 @@ build/
 .eggs/
 
 # ── Virtual environments ──────────────────────────────────────
-venv/
+myenv/
 .venv/
 env/
 .env/

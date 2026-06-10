@@ -16,35 +16,35 @@
 INSERT INTO dim_diseases
     (disease_name, disease_code, category, transmission, is_notifiable)
 VALUES
-    ('Cholera',
-     'A00',
-     'Infectious',
-     'Waterborne / Faecal-oral — contaminated water and food',
-     TRUE),
+     ('Cholera',
+      'A00',
+      'Infectious',
+      'Contaminated water and food',
+      TRUE),
 
-    ('Lassa Fever',
-     'A96.2',
-     'Infectious / Viral Haemorrhagic Fever',
-     'Rodent contact (Mastomys rat) / Person-to-person via body fluids',
-     TRUE),
+     ('Lassa Fever',
+      'A96.2',
+      'Viral Haemorrhagic Fever',
+      'Rodent contact / Body fluids',
+      TRUE),
 
-    ('Mpox',
-     'B04',
-     'Infectious / Zoonotic',
-     'Contact with infected animals or humans / Respiratory droplets',
-     TRUE),
+     ('Mpox',
+      'B04',
+      'Zoonotic',
+      'Animal/human contact / Droplets',
+      TRUE),
 
-    ('Meningitis',
-     'G03',
-     'Infectious — predominantly bacterial (N. meningitidis)',
-     'Respiratory droplets / Close and prolonged contact',
-     TRUE),
+     ('Meningitis',
+      'G03',
+      'Infectious / Bacterial',
+      'Respiratory droplets / Close contact',
+      TRUE),
 
-    ('Yellow Fever',
-     'A95',
-     'Infectious / Arboviral',
-     'Mosquito-borne — Aedes and Haemagogus species',
-     TRUE)
+     ('Yellow Fever',
+      'A95',
+      'Arboviral',
+      'Mosquito-borne',
+      TRUE)
 
 ON CONFLICT (disease_name) DO UPDATE SET
     disease_code = EXCLUDED.disease_code,

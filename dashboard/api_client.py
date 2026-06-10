@@ -29,23 +29,34 @@ import pandas as pd
 import requests
 
 # ── Configuration ─────────────────────────────────────────────────
-# Read the API base URL from the environment. Streamlit Cloud
-# injects this via the "secrets" or environment variable config.
-_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8000").rstrip("/")
+def _secret(key: str, default: str = "") -> str:
+    """Read a config value from st.secrets (Streamlit Cloud) or os.environ."""
+    try:
+        import streamlit as st
+        return str(st.secrets.get(key, os.environ.get(key, default)))
+    except Exception:
+        return os.environ.get(key, default)
+
+
+_BASE_URL = _secret("API_BASE_URL", "http://localhost:8000").rstrip("/")
 _API_V1   = f"{_BASE_URL}/api/v1"
 
 # Request timeout in seconds — prevents the dashboard from hanging
 # if the API is slow or temporarily unreachable.
-_TIMEOUT = 30
+_TIMEOUT = 10
 
 # Optional API key for protected endpoints
-_API_KEY  = os.environ.get("API_KEY", "")
+_API_KEY  = _secret("API_KEY", "")
 _HEADERS  = {"X-API-Key": _API_KEY} if _API_KEY else {}
 
 
 # ── Internal helpers ─────────────────────────────────────────────
 
-def _get(endpoint: str, params: Optional[dict] = None) -> dict | list:
+def _get(
+    endpoint: str,
+    params:   Optional[dict] = None,
+    timeout:  int            = _TIMEOUT,
+) -> dict | list:
     """
     Perform a GET request against the API and return parsed JSON.
 
@@ -59,6 +70,8 @@ def _get(endpoint: str, params: Optional[dict] = None) -> dict | list:
         Path relative to /api/v1, e.g. "/surveillance".
     params : dict, optional
         Query parameters.
+    timeout : int
+        Request timeout in seconds. Override for slow endpoints (e.g. forecast).
 
     Returns
     -------
@@ -71,7 +84,7 @@ def _get(endpoint: str, params: Optional[dict] = None) -> dict | list:
             url,
             params  = {k: v for k, v in (params or {}).items() if v is not None},
             headers = _HEADERS,
-            timeout = _TIMEOUT,
+            timeout = timeout,
         )
         response.raise_for_status()
         return response.json()
@@ -306,6 +319,7 @@ def get_forecast(
             "state":         state,
             "horizon_weeks": horizon_weeks,
         },
+        timeout=60,
     )
     return _records_to_df(data, records_key="points")
 

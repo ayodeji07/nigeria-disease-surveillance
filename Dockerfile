@@ -19,11 +19,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy only requirements first — leverages Docker layer caching.
-# If requirements.txt hasn't changed, this layer is reused.
-COPY requirements.txt .
+# Uses the slim API-only requirements (no ETL/notebook packages).
+COPY requirements-api.txt .
 
 # Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements-api.txt
 
 # Copy the rest of the application source code
 COPY src/ ./src/

@@ -179,21 +179,27 @@ def forecast_disease(
     _logging.getLogger("prophet").setLevel(_logging.WARNING)
     _logging.getLogger("cmdstanpy").setLevel(_logging.WARNING)
 
+    # Yearly seasonality requires at least one full year of data to be
+    # meaningful; with fewer points Prophet overfits a wild seasonal curve
+    _has_full_year = len(series_df) >= 52
+    _yearly = yearly_seasonality and _has_full_year
+    if yearly_seasonality and not _has_full_year:
+        result.warnings.append(
+            f"Yearly seasonality disabled: only {len(series_df)} weeks of "
+            f"history (need ≥52). Using trend-only model."
+        )
+
     model = Prophet(
-        yearly_seasonality       = yearly_seasonality,
+        yearly_seasonality       = _yearly,
         weekly_seasonality       = weekly_seasonality,
         daily_seasonality        = False,
         changepoint_prior_scale  = changepoint_prior_scale,
-        # Nigerian harmattan season (dry / meningitis risk) peaks
-        # December–February. Rainy season (cholera risk) peaks
-        # June–September. These custom seasonalities improve
-        # accuracy over the generic yearly Fourier terms.
         seasonality_mode         = "multiplicative",
-        interval_width           = 0.95,   # 95% confidence intervals
+        interval_width           = 0.95,
     )
 
-    # Add Nigerian seasonal regressors if we have enough data
-    if yearly_seasonality and len(series_df) >= 52:
+    # Add Nigerian seasonal regressors only when we have sufficient history
+    if _yearly:
         model.add_seasonality(
             name="nigerian_dry_season",
             period=365.25,
@@ -387,12 +393,21 @@ def _prepare_series(
     if data.empty:
         return pd.DataFrame()
 
+    # Use primary_cases if pre-computed, else auto-detect:
+    # diseases where confirmed_cases sums to 0 (e.g. Meningitis) use suspected_cases
+    if "primary_cases" in data.columns:
+        case_col = "primary_cases"
+    elif data["confirmed_cases"].sum() == 0 and "suspected_cases" in data.columns:
+        case_col = "suspected_cases"
+    else:
+        case_col = "confirmed_cases"
+
     # Aggregate to one row per week
     agg = (
-        data.groupby("report_date")["confirmed_cases"]
+        data.groupby("report_date")[case_col]
         .sum()
         .reset_index()
-        .rename(columns={"report_date": "ds", "confirmed_cases": "y"})
+        .rename(columns={"report_date": "ds", case_col: "y"})
     )
 
     # Ensure ds is datetime
@@ -400,6 +415,10 @@ def _prepare_series(
 
     # Drop rows with null or negative y
     agg = agg[agg["y"].notna() & (agg["y"] >= 0)]
+
+    # Drop dates clearly outside the modern surveillance window (pre-2015
+    # values are PDF-parsing artefacts, not real surveillance records)
+    agg = agg[agg["ds"] >= "2015-01-01"]
 
     # Handle duplicate dates — can occur after a transform bug
     agg = (

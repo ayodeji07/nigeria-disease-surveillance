@@ -264,22 +264,40 @@ def clean_disease_dataframe(
     data = _add_date_column(data, disease_name)
 
     # ── Step 8: Calculate CFR ────────────────────────────────────
-    # CFR = deaths / confirmed_cases * 100
-    # Guard against division by zero — a state reporting 0 confirmed
-    # cases with 1 death is a data quality issue, not 100% CFR.
+    # CFR denominator depends on disease:
+    #   - Lassa Fever, Mpox: use confirmed_cases (lab-confirmed deaths)
+    #   - Cholera, Meningitis, Yellow Fever: use suspected_cases
+    #     (state-level confirmed breakdown not available from NCDC PDFs)
+    # Guard against division by zero throughout.
+    diseases_using_confirmed_denom = {"Lassa Fever", "Lassa_Fever", "Mpox", "Monkeypox"}
+    use_confirmed = disease_name in diseases_using_confirmed_denom
+
+    cfr_denominator = (
+        data["confirmed_cases"]
+        if use_confirmed
+        else data["suspected_cases"]
+    )
     data["cfr_pct"] = np.where(
-        data["confirmed_cases"] > 0,
-        (data["deaths"] / data["confirmed_cases"] * 100).round(4),
+        cfr_denominator > 0,
+        (data["deaths"] / cfr_denominator * 100).round(4),
         0.0,
     )
 
     # ── Step 9: Data quality flags ────────────────────────────────
-    data["data_quality_flag"] = "CLEAN"
+    # Preserve any flag already set by the PDF parser (e.g.
+    # "CURRENT_WEEK_DEATHS_UNAVAILABLE" from the Mpox parser).
+    # Only initialise to "CLEAN" where no flag exists yet.
+    if "data_quality_flag" not in data.columns:
+        data["data_quality_flag"] = "CLEAN"
+    else:
+        # Fill any rows the parser left unflagged
+        data["data_quality_flag"] = data["data_quality_flag"].fillna("CLEAN")
 
     # Flag rows where confirmed > suspected (data entry error)
     if "suspected_cases" in data.columns:
         data.loc[
-            data["confirmed_cases"] > data["suspected_cases"],
+            (data["confirmed_cases"] > data["suspected_cases"])
+            & (data["data_quality_flag"] == "CLEAN"),
             "data_quality_flag",
         ] = "CONFIRMED_EXCEEDS_SUSPECTED"
 
@@ -288,14 +306,16 @@ def clean_disease_dataframe(
     high_threshold = data["confirmed_cases"].quantile(0.99) * 3
     if high_threshold > 0:
         data.loc[
-            data["confirmed_cases"] > high_threshold,
+            (data["confirmed_cases"] > high_threshold)
+            & (data["data_quality_flag"] == "CLEAN"),
             "data_quality_flag",
         ] = "SUSPECT_HIGH_COUNT"
 
     # Flag missing dates
     if "report_date" in data.columns:
         data.loc[
-            data["report_date"].isna(),
+            data["report_date"].isna()
+            & (data["data_quality_flag"] == "CLEAN"),
             "data_quality_flag",
         ] = "MISSING_DATE"
 
@@ -488,6 +508,24 @@ def clean_population_data(df: pd.DataFrame) -> pd.DataFrame:
         )
         return pd.DataFrame(columns=["state", "population"])
 
+    # Parse population column to float before any aggregation
+    data[pop_col] = (
+        data[pop_col]
+        .astype(str)
+        .str.replace(",", "", regex=False)
+        .pipe(lambda s: pd.to_numeric(s, errors="coerce"))
+        .fillna(0)
+    )
+
+    # If this is LGA-level data, aggregate to state level first
+    lga_cols = [c for c in data.columns if "lga" in c.lower()]
+    is_lga_level = len(lga_cols) > 0 and len(data) > 40
+    if is_lga_level:
+        data = (
+            data.groupby(state_col, as_index=False)[pop_col]
+            .sum()
+        )
+
     result = data[[state_col, pop_col]].copy()
     result.columns = ["state", "population"]
 
@@ -495,15 +533,8 @@ def clean_population_data(df: pd.DataFrame) -> pd.DataFrame:
     result["state"] = result["state"].apply(normalise_state_name)
     result = result[result["state"].isin(CANONICAL_STATE_SET)].copy()
 
-    # Parse population to integer
-    result["population"] = (
-        result["population"]
-        .astype(str)
-        .str.replace(",", "", regex=False)
-        .pipe(lambda s: pd.to_numeric(s, errors="coerce"))
-        .fillna(0)
-        .astype(int)
-    )
+    # Convert to integer
+    result["population"] = result["population"].round(0).astype(int)
 
     # Sanity check: Nigerian state populations range from ~600k to ~15M
     suspicious = result[
@@ -524,20 +555,14 @@ def clean_population_data(df: pd.DataFrame) -> pd.DataFrame:
 def _find_column(df: pd.DataFrame, keywords: list[str]) -> Optional[str]:
     """
     Return the first column name whose lowercase form contains any keyword.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        The DataFrame to search.
-    keywords : list[str]
-        Substrings to look for in column names (order matters).
-
-    Returns
-    -------
-    str | None
-        The matching column name, or None if not found.
+    Tries exact matches first, then partial matches.
     """
     lower_cols = {col.lower().strip(): col for col in df.columns}
+    # Exact match pass
+    for keyword in keywords:
+        if keyword.lower() in lower_cols:
+            return lower_cols[keyword.lower()]
+    # Partial match pass
     for keyword in keywords:
         for lower_col, original_col in lower_cols.items():
             if keyword in lower_col:
@@ -572,6 +597,26 @@ def merge_all_diseases(
 
     combined = pd.concat(frames, ignore_index=True)
 
+    # For diseases where lab-confirmed counts are never recorded (e.g. Meningitis,
+    # where NCDC state-level reports only contain suspected cases), use suspected_cases
+    # as the primary metric. This is data-driven: any disease whose confirmed_cases
+    # sum to zero across all rows automatically uses suspected_cases instead.
+    diseases_no_confirmed = (
+        combined.groupby("disease")["confirmed_cases"]
+        .sum()
+        .pipe(lambda s: s[s == 0].index.tolist())
+    )
+    if diseases_no_confirmed:
+        logger.info(
+            "Using suspected_cases as primary_cases for: %s",
+            ", ".join(diseases_no_confirmed),
+        )
+    combined["primary_cases"] = np.where(
+        combined["disease"].isin(diseases_no_confirmed),
+        combined["suspected_cases"],
+        combined["confirmed_cases"],
+    )
+
     # Ensure a consistent column order regardless of source
     ordered_columns = [
         "state",
@@ -579,11 +624,13 @@ def merge_all_diseases(
         "report_date",
         "epi_week",
         "year",
+        "primary_cases",
         "suspected_cases",
         "confirmed_cases",
         "deaths",
         "cfr_pct",
         "data_quality_flag",
+        "_data_type",       # current_week_highlights / national_cumulative / etc.
         "_source_file",
     ]
 
@@ -640,9 +687,12 @@ def add_incidence_rate(
 
     # States with no population match get NaN incidence — honest
     # rather than silently wrong.
+    # Use primary_cases (which substitutes suspected for diseases with no confirmed)
+    # so that meningitis incidence is not always zero.
+    case_col = "primary_cases" if "primary_cases" in merged.columns else "confirmed_cases"
     merged["incidence_per_100k"] = np.where(
-        (merged["population"] > 0) & (merged["confirmed_cases"].notna()),
-        (merged["confirmed_cases"] / merged["population"] * INCIDENCE_PER_N).round(4),
+        (merged["population"] > 0) & (merged[case_col].notna()),
+        (merged[case_col] / merged["population"] * INCIDENCE_PER_N).round(4),
         np.nan,
     )
 

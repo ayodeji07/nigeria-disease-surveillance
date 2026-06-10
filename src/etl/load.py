@@ -112,7 +112,11 @@ def load_dim_states(
                 from src.utils.state_maps import normalise_state_name
                 canonical = normalise_state_name(raw_name)
                 if canonical and canonical in set(CANONICAL_STATES):
-                    geom_lookup[canonical] = row.geometry.wkt
+                    from shapely.geometry import MultiPolygon
+                    geom = row.geometry
+                    if geom.geom_type == "Polygon":
+                        geom = MultiPolygon([geom])
+                    geom_lookup[canonical] = geom.wkt
 
     loaded = 0
     state_id_map: dict[str, int] = {}

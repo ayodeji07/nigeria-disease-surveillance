@@ -57,6 +57,11 @@ def client():
     os.environ["API_KEY"]      = "test-api-key-12345"
     os.environ["APP_ENV"]      = "development"
 
+    # Reset any cached engine so it is recreated with the SQLite URL above,
+    # not a previously-cached PostgreSQL engine from other test modules.
+    from src.db.connection import dispose_engine as _dispose
+    _dispose()
+
     from src.api.main import app
     from src.db.connection import get_engine
     from src.db.models import Base

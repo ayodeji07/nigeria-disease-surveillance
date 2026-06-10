@@ -38,6 +38,13 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _round_expr(col: str, decimals: int, dialect: str) -> str:
+    """Return a ROUND() SQL fragment compatible with the active dialect."""
+    if dialect == "postgresql":
+        return f"ROUND({col}::numeric, {decimals})"
+    return f"ROUND({col}, {decimals})"
+
+
 # ── Surveillance queries ─────────────────────────────────────────
 
 def get_surveillance_records(
@@ -180,12 +187,15 @@ def get_national_summary(
     if year:
         params["year"] = year
 
+    dialect = session.bind.dialect.name
+    cfr_expr = _round_expr("AVG(f.cfr_pct)", 2, dialect)
+
     query = text(f"""
         SELECT
             d.disease_name                          AS disease,
             SUM(f.confirmed_cases)                  AS total_cases,
             SUM(f.deaths)                           AS total_deaths,
-            ROUND(AVG(f.cfr_pct)::numeric, 2)       AS avg_cfr_pct,
+            {cfr_expr}                              AS avg_cfr_pct,
             MAX(f.confirmed_cases)                  AS peak_week_cases,
             COUNT(DISTINCT f.state_id)              AS states_affected
         FROM  fact_disease_surveillance f
@@ -223,12 +233,25 @@ def get_disease_trend(
     pd.DataFrame
         Columns: period, confirmed_cases, deaths, cfr_pct.
     """
+    dialect = session.bind.dialect.name  # "postgresql" or "sqlite"
+
     if freq == "monthly":
-        period_expr = "TO_CHAR(dt.report_date, 'YYYY-MM')"
-        order_expr  = "TO_CHAR(dt.report_date, 'YYYY-MM')"
+        if dialect == "postgresql":
+            period_expr = "TO_CHAR(dt.report_date, 'YYYY-MM')"
+        else:
+            period_expr = "strftime('%Y-%m', dt.report_date)"
+        order_expr = period_expr
     else:
-        period_expr = "dt.report_date::text"
-        order_expr  = "dt.report_date"
+        if dialect == "postgresql":
+            period_expr = "dt.report_date::text"
+        else:
+            period_expr = "CAST(dt.report_date AS TEXT)"
+        order_expr = "dt.report_date"
+
+    if dialect == "postgresql":
+        cfr_expr = "ROUND(AVG(f.cfr_pct)::numeric, 3)"
+    else:
+        cfr_expr = "ROUND(AVG(f.cfr_pct), 3)"
 
     state_clause = "AND s.state_name = :state" if state else ""
     params: dict = {"disease": disease}
@@ -240,7 +263,7 @@ def get_disease_trend(
             {period_expr}                        AS period,
             SUM(f.confirmed_cases)               AS confirmed_cases,
             SUM(f.deaths)                        AS deaths,
-            ROUND(AVG(f.cfr_pct)::numeric, 3)    AS cfr_pct,
+            {cfr_expr}                           AS cfr_pct,
             AVG(f.incidence_per_100k)            AS avg_incidence
         FROM  fact_disease_surveillance f
         JOIN  dim_diseases d  ON f.disease_id = d.disease_id
@@ -282,14 +305,18 @@ def get_state_burden(
     if year:
         params["year"] = year
 
+    dialect = session.bind.dialect.name
+    inc_expr = _round_expr("AVG(f.incidence_per_100k)", 2, dialect)
+    cfr_expr = _round_expr("AVG(f.cfr_pct)", 3, dialect)
+
     query = text(f"""
         SELECT
             s.state_name                             AS state,
             s.geopolitical_zone                      AS zone,
             SUM(f.confirmed_cases)                   AS total_cases,
             SUM(f.deaths)                            AS total_deaths,
-            ROUND(AVG(f.incidence_per_100k)::numeric, 2) AS avg_incidence_per_100k,
-            ROUND(AVG(f.cfr_pct)::numeric, 3)        AS cfr_pct
+            {inc_expr}                               AS avg_incidence_per_100k,
+            {cfr_expr}                               AS cfr_pct
         FROM  fact_disease_surveillance f
         JOIN  dim_states   s  ON f.state_id   = s.state_id
         JOIN  dim_diseases d  ON f.disease_id = d.disease_id
@@ -368,9 +395,7 @@ def get_choropleth_data(
             SUM(f.confirmed_cases)                          AS total_cases,
             SUM(f.deaths)                                   AS total_deaths,
             ROUND(AVG(f.incidence_per_100k)::numeric, 2)    AS avg_incidence_per_100k,
-            ST_AsGeoJSON(
-                ST_GeomFromText(s.geometry, 4326)
-            )                                               AS geometry_json
+            ST_AsGeoJSON(s.geometry)                        AS geometry_json
         FROM  fact_disease_surveillance f
         JOIN  dim_states   s  ON f.state_id   = s.state_id
         JOIN  dim_diseases d  ON f.disease_id = d.disease_id

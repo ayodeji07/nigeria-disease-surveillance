@@ -117,6 +117,7 @@ STATE_NAME_VARIANTS: dict[str, str] = {
     "ebonyi":    "Ebonyi",
     "edo":       "Edo",
     "ekiti":     "Ekiti",
+    "eketi":     "Ekiti",    # typo seen in NCDC PDFs
     "enugu":     "Enugu",
     "gombe":     "Gombe",
     "imo":       "Imo",
@@ -140,6 +141,25 @@ STATE_NAME_VARIANTS: dict[str, str] = {
     "zamfara":   "Zamfara",
 
     # ── Rows that should be dropped (national totals) ─────────
+    # ── Extra variants from NCDC PDFs ───────────────────────────────
+    # Truncated names from Cholera PDF (column border cuts first char)
+    "orno":                        "Borno",
+    "atsina":                      "Katsina",
+    "araba":                       "Taraba",
+    "ross river":                  "Cross River",
+    "ross_river":                  "Cross River",
+    # Mpox paragraph text variants
+    "river":                       "Rivers",   # "River (1)" seen in early 2022 mpox PDFs
+    "adawama":                     "Adamawa",  # typo seen in week 2, 2023
+    # FCT variants seen in PDF reports
+    "fct abuja":                   "FCT",
+    "federal capital territory":   "FCT",
+    "f.c.t":                       "FCT",
+    # Compact/merged variants
+    "akwaibom":                    "Akwa Ibom",
+    "crossriver":                  "Cross River",
+    "niger state":                 "Niger",
+
     "nigeria":     "NATIONAL",
     "national":    "NATIONAL",
     "total":       "NATIONAL",
@@ -245,6 +265,9 @@ STATE_CENTROIDS: dict[str, tuple[float, float]] = {
     "Taraba":      (7.9994,  10.7739),
     "Yobe":        (12.2939, 11.7467),
     "Zamfara":     (12.1702, 6.6572),
+    # Truncated names from Cholera PDF (first char cut by column border)
+    # (entries moved to STATE_NAME_VARIANTS below)
+
 }
 
 

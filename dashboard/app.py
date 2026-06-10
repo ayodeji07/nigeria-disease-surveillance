@@ -18,9 +18,15 @@ Architecture:
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# Ensure project root is on sys.path so 'dashboard' is importable
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import streamlit as st
 
-from dashboard.pages import overview, state_view, geo_atlas, forecasting
+from dashboard._pages import overview, state_view, geo_atlas, forecasting
 from dashboard.api_client import get_diseases, get_health
 
 # ── Page configuration ────────────────────────────────────────────
@@ -39,33 +45,6 @@ st.set_page_config(
 )
 
 
-# ── Custom CSS ────────────────────────────────────────────────────
-# Minimal style overrides — keep the native Streamlit look mostly
-# intact but tighten spacing and polish the metric cards.
-
-st.markdown(
-    """
-    <style>
-    /* Tighten top padding */
-    .block-container { padding-top: 1.5rem; }
-
-    /* Metric card styling */
-    [data-testid="stMetricValue"] {
-        font-size: 1.6rem;
-        font-weight: 500;
-    }
-
-    /* Sidebar header */
-    .sidebar-title {
-        font-size: 1.1rem;
-        font-weight: 500;
-        color: #1D9E75;
-        margin-bottom: 0.25rem;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
 
 
 # ── API health check ──────────────────────────────────────────────
@@ -113,10 +92,7 @@ def _render_sidebar() -> tuple[str, int | None, str]:
     with st.sidebar:
 
         # ── Branding ──────────────────────────────────────────────
-        st.markdown(
-            '<p class="sidebar-title">🏥 Nigeria Disease Surveillance</p>',
-            unsafe_allow_html=True,
-        )
+        st.markdown("### 🏥 Nigeria Disease Surveillance")
         st.caption("5 diseases · 37 states · 2015–present")
         st.divider()
 
@@ -206,10 +182,8 @@ def _route(page: str, year: int | None, disease: str) -> None:
         )
 
     elif page == "🗺️ Geospatial Atlas":
-        # Geospatial requires a specific year — default to 2023
-        geo_year = year if year else 2023
         geo_atlas.render(
-            selected_year    = geo_year,
+            selected_year    = year,
             selected_disease = disease,
         )
 
@@ -228,6 +202,11 @@ def _route(page: str, year: int | None, disease: str) -> None:
 def main() -> None:
     """Application entry point called by Streamlit."""
     page, year, disease = _render_sidebar()
+    # When the active page changes, force a full script re-run so all widgets
+    # from the previous page are cleared before the new page renders.
+    if st.session_state.get("_active_page") != page:
+        st.session_state["_active_page"] = page
+        st.rerun()
     _route(page, year, disease)
 
 

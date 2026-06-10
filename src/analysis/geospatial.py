@@ -132,8 +132,8 @@ def prepare_choropleth(
         how="left",
     )
 
-    # Drop the working column
-    merged = merged.drop(columns=["_canonical_name"], errors="ignore")
+    # Promote the canonical name to a 'state' column
+    merged = merged.rename(columns={"_canonical_name": "state"})
 
     missing_data = merged[value_col].isna().sum()
     if missing_data > 0:
@@ -188,9 +188,9 @@ def geodataframe_to_geojson(
             continue
 
         # Convert geometry to GeoJSON dict
-        geom_dict = json.loads(geom.__geo_interface__.__str__()
-                               if hasattr(geom, '__geo_interface__')
-                               else json.dumps(geom.__geo_interface__))
+        if not hasattr(geom, '__geo_interface__'):
+            continue
+        geom_dict = dict(geom.__geo_interface__)
 
         # Replace NaN with None so JSON serialisation works
         props = {}
@@ -275,6 +275,16 @@ def compute_morans_i(
 
     # Merge burden with geometries
     merged = prepare_choropleth(data, states_gdf, value_col)
+
+    # Guard: burden column absent when disease has no data for this year
+    if value_col not in merged.columns:
+        return MoranResult(
+            disease=disease, year=year,
+            morans_i=0.0, expected_i=0.0, variance=0.0,
+            z_score=0.0, p_value=1.0, significant=False,
+            pattern="no data",
+            interpretation=f"No {disease} data available for {year}.",
+        )
 
     # Drop states with missing values — Moran's I cannot handle NaN
     merged = merged.dropna(subset=[value_col])
@@ -426,15 +436,25 @@ def analyse_facility_accessibility(
         merged["avg_incidence_per_100k"] * 100,  # large penalty for zero facilities
     ).round(3)
 
-    # Classify access level based on facilities per 100k
-    # Thresholds from WHO primary health care benchmarks
-    def _classify(row: pd.Series) -> str:
-        fac = row["facilities_per_100k"]
-        if fac < 0.5:
+    # Classify using percentile-based thresholds on access_gap_score so that
+    # the flag reflects relative burden across states for this disease.
+    # States with zero access gap score (no burden) are always GOOD.
+    nonzero_scores = merged["access_gap_score"][merged["access_gap_score"] > 0]
+    if len(nonzero_scores) >= 4:
+        p75 = float(np.percentile(nonzero_scores, 75))
+        p50 = float(np.percentile(nonzero_scores, 50))
+        p25 = float(np.percentile(nonzero_scores, 25))
+    else:
+        p75, p50, p25 = 1.0, 0.5, 0.1  # fallback if too few data points
+
+    def _classify(score: float) -> str:
+        if score == 0:
+            return "GOOD"
+        elif score >= p75:
             return "CRITICAL"
-        elif fac < 1.0:
+        elif score >= p50:
             return "POOR"
-        elif fac < 2.0:
+        elif score >= p25:
             return "ADEQUATE"
         else:
             return "GOOD"
@@ -448,7 +468,7 @@ def analyse_facility_accessibility(
                 facilities_per_100k = float(row["facilities_per_100k"]),
                 disease_burden      = float(row["avg_incidence_per_100k"]),
                 access_gap_score    = float(row["access_gap_score"]),
-                flag                = _classify(row),
+                flag                = _classify(float(row["access_gap_score"])),
             )
         )
 
