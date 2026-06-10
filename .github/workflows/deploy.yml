@@ -24,10 +24,25 @@ on:
   push:
     branches:
       - main
-      - develop            # Also run tests on develop, but skip deploy
+      - develop
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "dashboard/**"
+      - "requirements*.txt"
+      - "Dockerfile"
+      - "render.yaml"
+      - ".github/workflows/deploy.yml"
   pull_request:
     branches:
       - main
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "dashboard/**"
+      - "requirements*.txt"
+      - "Dockerfile"
+      - "render.yaml"
 
 jobs:
   # ──────────────────────────────────────────────────────────────
