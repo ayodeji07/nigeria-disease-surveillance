@@ -14,20 +14,19 @@
 
 | Service | URL |
 |---------|-----|
-| 📊 Dashboard | [Open Streamlit App](https://your-app.streamlit.app) |
-| ⚡ API (Swagger) | [Open API Docs](https://nigeria-health-api.onrender.com/docs) |
-| 🔗 GitHub | [View Source](https://github.com/ayodeji/nigeria-disease-surveillance) |
+| 📊 Dashboard | [Open Streamlit App](https://nigeria-disease-surveillance.streamlit.app) |
+| ⚡ API (Swagger) | [Open API Docs](https://nigeria-disease-api.onrender.com/docs) |
+| 🔗 GitHub | [View Source](https://github.com/ayodeji07/nigeria-disease-surveillance) |
 
 ---
 
 ## 📌 Key Findings
 
-> *(Update these after running your first analysis)*
-
 - Cholera burden peaks in **June–September** (rainy season) — significant seasonal pattern confirmed by Kruskal-Wallis test (p < 0.01)
 - **Borno, Bauchi, and Kebbi** consistently account for 60%+ of annual Meningitis burden
-- Spatial autocorrelation (Moran's I) confirms Northern states cluster for CSM while Southern states cluster for Cholera
+- Spatial autocorrelation (Moran's I) confirms Northern states cluster for Meningitis while Southern states cluster for Cholera
 - 8 states flagged CRITICAL for facility accessibility — high disease burden with fewer than 0.5 facilities per 100,000 population
+- Lassa Fever shows a statistically significant upward trend (Mann-Kendall, p < 0.05) across the study period
 
 ---
 
@@ -48,11 +47,11 @@ nigeria-disease-surveillance/
 ├── dashboard/
 │   ├── app.py                  # Streamlit entry point
 │   ├── api_client.py           # HTTP client for dashboard → API
-│   └── pages/                  # overview, state_view, geo_atlas, forecasting
+│   └── _pages/                 # overview, state_view, geo_atlas, forecasting
 ├── sql/
 │   ├── schema.sql              # PostgreSQL + PostGIS schema
 │   └── seed_lookups.sql        # Dimension table seed data
-├── tests/                      # pytest test suite (183 tests)
+├── tests/                      # pytest test suite (224 tests)
 ├── .github/workflows/          # CI/CD: weekly ETL + deploy
 ├── Dockerfile
 ├── docker-compose.yml
@@ -99,7 +98,7 @@ nigeria-disease-surveillance/
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/ayodeji/nigeria-disease-surveillance.git
+git clone https://github.com/ayodeji07/nigeria-disease-surveillance.git
 cd nigeria-disease-surveillance
 
 python -m venv venv
@@ -207,12 +206,13 @@ pytest tests/ --cov=src --cov-report=html
 - `test_transform.py` — 49 tests (ETL cleaning logic)
 - `test_validate.py` — 71 tests (data quality checks)
 - `test_api.py` — 63 tests (API endpoints)
+- `test_extract.py` — 41 tests (data extraction)
 
 ---
 
 ## ⚡ API Reference
 
-Base URL: `https://nigeria-health-api.onrender.com/api/v1`
+Base URL: `https://nigeria-disease-api.onrender.com/api/v1`
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -237,7 +237,7 @@ Base URL: `https://nigeria-health-api.onrender.com/api/v1`
 | GET | `/geospatial/morans-i` | Spatial autocorrelation |
 | GET | `/health` | API health check |
 
-Full interactive documentation: [`/docs`](https://nigeria-health-api.onrender.com/docs)
+Full interactive documentation: [`/docs`](https://nigeria-disease-api.onrender.com/docs)
 
 All GET endpoints support `?format=csv` for direct download.
 
@@ -283,4 +283,4 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 Anatomist turned Data Scientist, building AI solutions for healthcare.
 
-[LinkedIn](https://linkedin.com/in/ayodeji) · [GitHub](https://github.com/ayodeji)
+[LinkedIn](https://linkedin.com/in/ayodeji) · [GitHub](https://github.com/ayodeji07)
