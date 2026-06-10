@@ -7,8 +7,13 @@ Non-technical users can drop a new NCDC situation report PDF here.
 The API extracts, cleans, and loads the data into the database
 automatically. No command-line access required.
 
+Security:
+  - Password gate: upload form is hidden until correct password entered
+  - Session expires after 30 minutes of inactivity
+  - Password field is hidden once authenticated
+
 Streamlit Cloud secrets required:
-  ADMIN_PASSWORD — password shown to the person uploading
+  ADMIN_PASSWORD — password for the upload portal
   API_KEY        — forwarded to the FastAPI /admin/upload endpoint
 ────────────────────────────────────────────────────────────────
 """
@@ -16,10 +21,10 @@ Streamlit Cloud secrets required:
 from __future__ import annotations
 
 import os
+import time
 
 import requests
 import streamlit as st
-
 
 _DISEASES = [
     "Cholera",
@@ -29,6 +34,31 @@ _DISEASES = [
     "Yellow Fever",
 ]
 
+_SESSION_TIMEOUT = 30 * 60  # 30 minutes in seconds
+
+
+def _is_session_valid() -> bool:
+    """Return True if the admin session is authenticated and not yet expired."""
+    if not st.session_state.get("admin_authenticated"):
+        return False
+    elapsed = time.time() - st.session_state.get("admin_login_time", 0)
+    return elapsed < _SESSION_TIMEOUT
+
+
+def _login(password: str) -> bool:
+    """Validate password and start a session. Returns True on success."""
+    expected = st.secrets.get("ADMIN_PASSWORD", "")
+    if password == expected:
+        st.session_state["admin_authenticated"] = True
+        st.session_state["admin_login_time"] = time.time()
+        return True
+    return False
+
+
+def _logout() -> None:
+    st.session_state["admin_authenticated"] = False
+    st.session_state["admin_login_time"] = 0
+
 
 def render() -> None:
     st.title("⚙️ Admin — Upload PDF Report")
@@ -36,29 +66,42 @@ def render() -> None:
         "Upload a new NCDC situation report PDF. "
         "The system will extract, clean, and load the data automatically."
     )
-
     st.divider()
 
-    # ── Password gate ────────────────────────────────────────────
-    password = st.text_input(
-        "Admin password",
-        type="password",
-        placeholder="Enter password to continue",
-    )
+    # ── Session expired notice ────────────────────────────────────
+    if st.session_state.get("admin_authenticated") and not _is_session_valid():
+        _logout()
+        st.warning("Your session has expired after 30 minutes. Please log in again.")
 
-    if not password:
-        st.info("Enter the admin password to access the upload form.")
-        st.stop()
+    # ── Password gate ─────────────────────────────────────────────
+    if not _is_session_valid():
+        password = st.text_input(
+            "Admin password",
+            type="password",
+            placeholder="Enter password to continue",
+        )
 
-    expected = st.secrets.get("ADMIN_PASSWORD", "")
-    if password != expected:
-        st.error("Incorrect password. Please try again.")
-        st.stop()
+        if not password:
+            st.info("Enter the admin password to access the upload form.")
+            st.stop()
 
-    # ── Authenticated ────────────────────────────────────────────
-    st.success("✅ Authenticated")
+        if not _login(password):
+            st.error("Incorrect password. Please try again.")
+            st.stop()
+
+        st.rerun()
+
+    # ── Authenticated ─────────────────────────────────────────────
+    elapsed = time.time() - st.session_state.get("admin_login_time", 0)
+    remaining = int((_SESSION_TIMEOUT - elapsed) / 60)
+
+    col_status, col_logout = st.columns([4, 1])
+    col_status.success(f"✅ Authenticated — session expires in {remaining} min")
+    if col_logout.button("Log out"):
+        _logout()
+        st.rerun()
+
     st.divider()
-
     st.markdown("### Upload a new NCDC PDF report")
 
     disease = st.selectbox(
@@ -76,7 +119,9 @@ def render() -> None:
     if uploaded_file is None:
         st.stop()
 
-    st.caption(f"File ready: **{uploaded_file.name}** ({len(uploaded_file.getvalue()):,} bytes)")
+    st.caption(
+        f"File ready: **{uploaded_file.name}** ({len(uploaded_file.getvalue()):,} bytes)"
+    )
 
     if not st.button("Upload & Process", type="primary"):
         st.stop()
@@ -107,7 +152,7 @@ def render() -> None:
             st.error("Could not reach the API. Check that the API is running.")
             return
 
-    # ── Show result ──────────────────────────────────────────────
+    # ── Show result ───────────────────────────────────────────────
     try:
         result = response.json()
     except Exception:
