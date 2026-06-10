@@ -8,14 +8,7 @@
 #   2. deploy — trigger a Render.com redeploy (only on main, after tests pass)
 #
 # Required GitHub Secrets:
-#   RENDER_API_KEY        — Render.com API key
-#   RENDER_SERVICE_ID     — Service ID of your Render web service
-#                           (found in the Render dashboard URL)
-#
-# To get RENDER_SERVICE_ID:
-#   1. Go to your service on render.com
-#   2. The URL looks like: render.com/services/srv-xxxxxxxxxx
-#   3. The service ID is "srv-xxxxxxxxxx"
+#   RENDER_DEPLOY_HOOK_URL — from Render service → Settings → Deploy Hook
 # ─────────────────────────────────────────────────────────────────
 
 name: Test & Deploy
@@ -119,21 +112,7 @@ jobs:
       - name: Trigger Render deploy
         run: |
           echo "Triggering deployment to Render..."
-          HTTP_STATUS=$(curl \
-            --silent \
-            --output response.json \
-            --write-out "%{http_code}" \
-            --request POST \
-            --header "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
-            --header "Content-Type: application/json" \
-            --data '{"clearCache":"do_not_clear"}' \
-            "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys")
-          echo "HTTP status: $HTTP_STATUS"
-          cat response.json
-          if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
-            echo "Deploy failed"
-            exit 1
-          fi
+          curl --silent "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
           echo "Deploy triggered successfully"
 
       - name: Wait for deploy and verify health

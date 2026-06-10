@@ -26,7 +26,7 @@
 - **Borno, Bauchi, and Kebbi** consistently account for 60%+ of annual Meningitis burden
 - Spatial autocorrelation (Moran's I) confirms Northern states cluster for Meningitis while Southern states cluster for Cholera
 - 8 states flagged CRITICAL for facility accessibility — high disease burden with fewer than 0.5 facilities per 100,000 population
-- Lassa Fever shows a statistically significant upward trend (Mann-Kendall, p < 0.05) across the study period
+- Lassa Fever cases surged **330×** in four years (3 confirmed in 2021 → 992 in 2024), with a 24.1% national Case Fatality Rate
 
 ---
 
@@ -80,11 +80,13 @@ nigeria-disease-surveillance/
 
 ## 📊 Screenshots
 
-*(Add screenshots of your dashboard here after first deployment)*
+| National Overview | Facility Access Gap — Lassa Fever |
+|------------------|----------------------------------|
+| ![Overview](reports/screenshots/fig1_national_overview.png) | ![Facility Access](reports/screenshots/fig3_facility_access.png) |
 
-| National Overview | Geospatial Atlas |
-|------------------|-----------------|
-| ![Overview](docs/screenshots/overview.png) | ![Map](docs/screenshots/geo_atlas.png) |
+| Lassa Fever Choropleth (2022) | Cholera Trend & Seasonality |
+|------------------------------|----------------------------|
+| ![Choropleth](reports/screenshots/fig2_lassa_choropleth.png) | ![Trend](reports/screenshots/fig4_trend_seasonal.png) |
 
 ---
 
