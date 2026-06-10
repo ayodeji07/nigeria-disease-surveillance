@@ -52,6 +52,7 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
+          pip install pytest-timeout
 
       - name: Run tests
         env:
