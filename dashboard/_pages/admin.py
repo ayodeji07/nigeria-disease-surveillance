@@ -117,9 +117,12 @@ def render() -> None:
     if response.status_code == 200 and result.get("status") == "success":
         st.success(f"✅ {result['message']}")
         col1, col2, col3 = st.columns(3)
-        col1.metric("Rows extracted",  result.get("rows_extracted", "—"))
-        col2.metric("Rows loaded",     result.get("rows_loaded",    "—"))
-        col3.metric("Duplicates skipped", result.get("rows_skipped", "—"))
+        col1.metric("Rows extracted",     result.get("rows_extracted", "—"))
+        col2.metric("Rows loaded",        result.get("rows_loaded",    "—"))
+        col3.metric("Duplicates skipped", result.get("rows_skipped",   "—"))
+
+    elif response.status_code == 200 and result.get("status") == "already_loaded":
+        st.info(f"ℹ️ {result['message']}")
 
     elif response.status_code == 200 and result.get("status") == "no_data":
         st.warning(f"⚠️ {result['message']}")

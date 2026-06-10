@@ -17,6 +17,8 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
 
+from sqlalchemy import text
+
 from src.api.auth import require_api_key
 from src.db.connection import get_db_session
 from src.etl.extract import _extract_single_pdf
@@ -91,14 +93,36 @@ async def upload_pdf(
         raw_df = _extract_single_pdf(tmp_path, disease)
 
         if raw_df.empty:
+            # Check whether this disease already has data in the database
+            # to distinguish "already processed" from "unsupported format"
+            with get_db_session() as session:
+                row = session.execute(text("""
+                    SELECT COUNT(*) FROM fact_disease_surveillance f
+                    JOIN dim_diseases d ON f.disease_id = d.disease_id
+                    WHERE d.disease_name = :disease
+                """), {"disease": disease}).scalar()
+            already_loaded = (row or 0) > 0
+
+            if already_loaded:
+                message = (
+                    "This PDF appears to have been processed already — "
+                    "the data is already in the database."
+                )
+                status_val = "already_loaded"
+            else:
+                message = (
+                    "PDF was parsed but no rows were extracted. "
+                    "The report may use an unsupported table format."
+                )
+                status_val = "no_data"
+
             return JSONResponse(
                 status_code=200,
                 content={
-                    "status": "no_data",
+                    "status": status_val,
                     "disease": disease,
                     "filename": file.filename,
-                    "message": "PDF was parsed but no rows were extracted. "
-                               "The report may use an unsupported table format.",
+                    "message": message,
                     "rows_loaded": 0,
                     "rows_skipped": 0,
                 },
