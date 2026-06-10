@@ -497,6 +497,7 @@ def load_health_facilities(
     session: Session,
     facilities_df: pd.DataFrame,
     state_id_map: dict[str, int],
+    batch_size: int = 500,
 ) -> int:
     """
     Load health facility locations into the health_facilities table.
@@ -510,6 +511,9 @@ def load_health_facilities(
         state (canonical), lga_name, latitude, longitude.
     state_id_map : dict[str, int]
         From load_dim_states().
+    batch_size : int
+        Rows per batch commit. Keeps transactions short to avoid
+        connection timeouts on free-tier cloud databases.
 
     Returns
     -------
@@ -524,72 +528,61 @@ def load_health_facilities(
         "Loading health_facilities (%d records)...", len(facilities_df)
     )
 
-    # Identify column names flexibly — HDX files vary
-    col_map = _map_facility_columns(facilities_df)
-    loaded = 0
+    from src.utils.state_maps import normalise_state_name
+    col_map  = _map_facility_columns(facilities_df)
+    dialect  = session.bind.dialect.name
 
+    # Build the full record list before touching the DB
+    records: list[dict] = []
     for _, row in facilities_df.iterrows():
-        state_name = row.get(col_map.get("state", "state"), "")
-        from src.utils.state_maps import normalise_state_name
-        canonical_state = normalise_state_name(str(state_name))
-        state_id = state_id_map.get(canonical_state)
-
-        lat = _safe_float(row.get(col_map.get("latitude", "latitude")))
+        canonical_state = normalise_state_name(
+            str(row.get(col_map.get("state", "state"), ""))
+        )
+        lat = _safe_float(row.get(col_map.get("latitude",  "latitude")))
         lon = _safe_float(row.get(col_map.get("longitude", "longitude")))
+        records.append({
+            "facility_name": str(row.get(col_map.get("name",      ""), ""))[:200],
+            "facility_type": str(row.get(col_map.get("type",      ""), ""))[:50],
+            "state_id":      state_id_map.get(canonical_state),
+            "lga_name":      str(row.get(col_map.get("lga",       ""), ""))[:100],
+            "ownership":     str(row.get(col_map.get("ownership", ""), ""))[:50],
+            "latitude":      lat,
+            "longitude":     lon,
+            "geometry":      f"POINT({lon} {lat})" if lat is not None and lon is not None else None,
+        })
 
-        # Build WKT point geometry if coordinates are available
-        geometry_wkt = None
-        if lat is not None and lon is not None:
-            geometry_wkt = f"POINT({lon} {lat})"
+    if dialect == "postgresql":
+        sql = text("""
+            INSERT INTO health_facilities
+                (facility_name, facility_type, state_id,
+                 lga_name, ownership, latitude, longitude, geometry)
+            VALUES
+                (:facility_name, :facility_type, :state_id,
+                 :lga_name, :ownership, :latitude, :longitude,
+                 CASE WHEN :geometry IS NULL THEN NULL
+                      ELSE ST_GeomFromText(:geometry, 4326) END)
+            ON CONFLICT DO NOTHING
+        """)
+    else:
+        sql = text("""
+            INSERT OR IGNORE INTO health_facilities
+                (facility_name, facility_type, state_id,
+                 lga_name, ownership, latitude, longitude, geometry)
+            VALUES
+                (:facility_name, :facility_type, :state_id,
+                 :lga_name, :ownership, :latitude, :longitude,
+                 :geometry)
+        """)
 
-        if session.bind.dialect.name == "postgresql":
-            session.execute(
-                text("""
-                    INSERT INTO health_facilities
-                        (facility_name, facility_type, state_id,
-                         lga_name, ownership, latitude, longitude, geometry)
-                    VALUES
-                        (:facility_name, :facility_type, :state_id,
-                         :lga_name, :ownership, :latitude, :longitude,
-                         :geometry)
-                    ON CONFLICT DO NOTHING
-                """),
-                {
-                    "facility_name": str(row.get(col_map.get("name", ""), ""))[:200],
-                    "facility_type": str(row.get(col_map.get("type", ""), ""))[:50],
-                    "state_id":      state_id,
-                    "lga_name":      str(row.get(col_map.get("lga", ""), ""))[:100],
-                    "ownership":     str(row.get(col_map.get("ownership", ""), ""))[:50],
-                    "latitude":      lat,
-                    "longitude":     lon,
-                    "geometry":      geometry_wkt,
-                },
-            )
-        else:
-            session.execute(
-                text("""
-                    INSERT OR IGNORE INTO health_facilities
-                        (facility_name, facility_type, state_id,
-                         lga_name, ownership, latitude, longitude, geometry)
-                    VALUES
-                        (:facility_name, :facility_type, :state_id,
-                         :lga_name, :ownership, :latitude, :longitude,
-                         :geometry)
-                """),
-                {
-                    "facility_name": str(row.get(col_map.get("name", ""), ""))[:200],
-                    "facility_type": str(row.get(col_map.get("type", ""), ""))[:50],
-                    "state_id":      state_id,
-                    "lga_name":      str(row.get(col_map.get("lga", ""), ""))[:100],
-                    "ownership":     str(row.get(col_map.get("ownership", ""), ""))[:50],
-                    "latitude":      lat,
-                    "longitude":     lon,
-                    "geometry":      geometry_wkt,
-                },
-            )
-        loaded += 1
+    loaded = 0
+    total  = len(records)
+    for i in range(0, total, batch_size):
+        batch = records[i : i + batch_size]
+        session.execute(sql, batch)
+        session.commit()
+        loaded += len(batch)
+        logger.info("health_facilities: %d / %d rows loaded", loaded, total)
 
-    session.flush()
     logger.info("health_facilities: %d rows loaded", loaded)
     return loaded
 

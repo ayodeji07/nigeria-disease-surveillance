@@ -122,7 +122,7 @@ jobs:
           MAX_ATTEMPTS=5
           ATTEMPT=0
           until curl --silent --fail \
-            "https://nigeria-health-api.onrender.com/health" > /dev/null 2>&1; do
+            "https://nigeria-disease-api.onrender.com/health" > /dev/null 2>&1; do
             ATTEMPT=$((ATTEMPT + 1))
             if [ $ATTEMPT -ge $MAX_ATTEMPTS ]; then
               echo "Health check failed after $MAX_ATTEMPTS attempts"
