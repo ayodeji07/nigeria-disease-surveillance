@@ -47,7 +47,10 @@ nigeria-disease-surveillance/
 ├── dashboard/
 │   ├── app.py                  # Streamlit entry point
 │   ├── api_client.py           # HTTP client for dashboard → API
-│   └── _pages/                 # overview, state_view, geo_atlas, forecasting
+│   └── _pages/                 # overview, state_view, geo_atlas, forecasting, admin
+├── reports/
+│   ├── policy_brief.md         # Data-driven policy brief
+│   └── screenshots/            # Dashboard screenshots
 ├── sql/
 │   ├── schema.sql              # PostgreSQL + PostGIS schema
 │   └── seed_lookups.sql        # Dimension table seed data
