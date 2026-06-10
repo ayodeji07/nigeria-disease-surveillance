@@ -78,6 +78,39 @@ nigeria-disease-surveillance/
 
 ---
 
+## 🏗️ Architecture
+
+```
+GitHub (source of truth)
+    │
+    ├── push to main
+    │       │
+    │       ├── GitHub Actions (deploy.yml)
+    │       │       ├── runs tests (SQLite, no cloud needed)
+    │       │       └── triggers Render redeploy via API
+    │       │
+    │       └── Streamlit Cloud (watches repo directly)
+    │               └── auto-redeploys when dashboard/ files change
+    │
+    ├── weekly_etl.yml (every Monday 06:00 UTC)
+    │       └── runs ETL pipeline → reads PDFs → writes to Supabase
+    │
+Render (API server)
+    │   reads DATABASE_URL secret → connects to Supabase
+    │   serves FastAPI at nigeria-disease-api.onrender.com
+    │
+Streamlit Cloud (dashboard)
+    │   reads API_BASE_URL + API_KEY secrets
+    │   calls Render API → gets data → renders charts
+    │
+Supabase (database)
+        stores all disease data, facilities, rainfall
+        PostGIS enabled for spatial queries
+        never directly exposed to the browser
+```
+
+---
+
 ## 📊 Screenshots
 
 | National Overview | Facility Access Gap — Lassa Fever |
@@ -285,4 +318,4 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 Anatomist turned Data Scientist, building AI solutions for healthcare.
 
-[LinkedIn](https://linkedin.com/in/ayodeji) · [GitHub](https://github.com/ayodeji07)
+[LinkedIn](https://linkedin.com/in/akandeayodeji) · [GitHub](https://github.com/ayodeji07)
